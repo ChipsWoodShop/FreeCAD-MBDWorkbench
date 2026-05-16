@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+*.pyo
+*.swp
+*.bak
+*.FCStd1
+*.FCStd~
+.vscode/
