@@ -15,12 +15,14 @@ class MBDWorkbench(FreeCADGui.Workbench):
             "MBD_CreateDatumFeature",
             "MBD_ValidatePMI",
             "MBD_ShowPMIInspector",
+            "MBD_CreateDatumSystem",
         ])
 
         self.appendMenu("MBD", [
             "MBD_CreateDatumFeature",
             "MBD_ValidatePMI",
             "MBD_ShowPMIInspector",
+            "MBD_CreateDatumSystem",
         ])
 
     def Activated(self):

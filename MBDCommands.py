@@ -12,6 +12,10 @@ from MBDDatum import (
     update_geometry_signature
 )
 import MBDInspector
+from MBDDatumSystem import (
+    MBDDatumSystem,
+    ViewProviderMBDDatumSystem
+)
 
 VALID_DATUM_LETTERS = [
     "A","B","C","D","E","F","G","H",
@@ -187,9 +191,111 @@ class ShowPMIInspectorCommand:
     def Activated(self):
         MBDInspector.show_inspector()
 
+class CreateDatumSystemCommand:
+
+    def GetResources(self):
+        return {
+            "MenuText": "Create Datum System",
+            "ToolTip": "Create a semantic datum system from selected datum features",
+            "Pixmap": ""
+        }
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+
+        doc = FreeCAD.ActiveDocument
+
+        selection = FreeCADGui.Selection.getSelection()
+
+        if len(selection) < 1 or len(selection) > 3:
+
+            QtGui.QMessageBox.warning(
+                None,
+                "Datum System",
+                "Select 1 to 3 datum features in precedence order."
+            )
+
+            return
+
+        datum_objects = []
+
+        for obj in selection:
+
+            if not hasattr(obj, "IsSemanticPMI"):
+
+                QtGui.QMessageBox.warning(
+                    None,
+                    "Datum System",
+                    "{} is not semantic PMI.".format(obj.Name)
+                )
+
+                return
+
+            if not hasattr(obj, "DatumLabel"):
+
+                QtGui.QMessageBox.warning(
+                    None,
+                    "Datum System",
+                    "{} is not a datum feature.".format(obj.Name)
+                )
+
+                return
+
+            datum_objects.append(obj)
+
+        labels = [obj.DatumLabel for obj in datum_objects]
+
+        if len(labels) != len(set(labels)):
+
+            QtGui.QMessageBox.warning(
+                None,
+                "Datum System",
+                "Duplicate datums are not allowed in a datum system."
+            )
+
+            return
+
+        name = "MBD_DatumSystem"
+
+        if len(labels) > 0:
+            name += "_" + "_".join(labels)
+
+        ds_obj = doc.addObject(
+            "App::FeaturePython",
+            name
+        )
+
+        MBDDatumSystem(ds_obj)
+
+        if len(datum_objects) >= 1:
+            ds_obj.PrimaryDatum = datum_objects[0]
+
+        if len(datum_objects) >= 2:
+            ds_obj.SecondaryDatum = datum_objects[1]
+
+        if len(datum_objects) >= 3:
+            ds_obj.TertiaryDatum = datum_objects[2]
+
+        if FreeCAD.GuiUp:
+            ViewProviderMBDDatumSystem(ds_obj.ViewObject)
+
+        doc.recompute()
+
+        FreeCAD.Console.PrintMessage(
+            "Created datum system: {}\n".format(
+                " | ".join(labels)
+            )
+        )
+
 FreeCADGui.addCommand("MBD_CreateDatumFeature", CreateDatumFeatureCommand())
 FreeCADGui.addCommand("MBD_ValidatePMI", ValidatePMICommand())
 FreeCADGui.addCommand(
     "MBD_ShowPMIInspector",
     ShowPMIInspectorCommand()
+)
+FreeCADGui.addCommand(
+    "MBD_CreateDatumSystem",
+    CreateDatumSystemCommand()
 )
