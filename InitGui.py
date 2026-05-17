@@ -16,6 +16,7 @@ class MBDWorkbench(FreeCADGui.Workbench):
             "MBD_ValidatePMI",
             "MBD_ShowPMIInspector",
             "MBD_CreateDatumSystem",
+            "MBD_CreateFeatureControlFrame",
         ])
 
         self.appendMenu("MBD", [
@@ -23,6 +24,7 @@ class MBDWorkbench(FreeCADGui.Workbench):
             "MBD_ValidatePMI",
             "MBD_ShowPMIInspector",
             "MBD_CreateDatumSystem",
+            "MBD_CreateFeatureControlFrame",
         ])
 
     def Activated(self):

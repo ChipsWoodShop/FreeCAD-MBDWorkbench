@@ -16,7 +16,10 @@ from MBDDatumSystem import (
     MBDDatumSystem,
     ViewProviderMBDDatumSystem
 )
-
+from MBDFeatureControlFrame import (
+    MBDFeatureControlFrame,
+    ViewProviderMBDFeatureControlFrame
+)
 VALID_DATUM_LETTERS = [
     "A","B","C","D","E","F","G","H",
     "J","K","L","M","N",
@@ -53,6 +56,16 @@ def get_next_available_datum_label(doc):
 
     raise Exception("Ran out of datum labels.")
 
+def get_datum_system_objects(doc):
+
+    systems = []
+
+    for obj in doc.Objects:
+
+        if hasattr(obj, "PrimaryDatum"):
+            systems.append(obj)
+
+    return systems
 class CreateDatumFeatureCommand:
     def GetResources(self):
         return {
@@ -289,6 +302,119 @@ class CreateDatumSystemCommand:
             )
         )
 
+class CreateFeatureControlFrameCommand:
+
+    def GetResources(self):
+        return {
+            "MenuText": "Create Feature Control Frame",
+            "ToolTip": "Create semantic feature control frame",
+            "Pixmap": ""
+        }
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+
+        doc = FreeCAD.ActiveDocument
+
+        sel = FreeCADGui.Selection.getSelectionEx()
+
+        if len(sel) != 1:
+
+            QtGui.QMessageBox.warning(
+                None,
+                "Feature Control Frame",
+                "Select exactly one controlled feature."
+            )
+
+            return
+
+        selection = sel[0]
+
+        if not selection.SubElementNames:
+
+            QtGui.QMessageBox.warning(
+                None,
+                "Feature Control Frame",
+                "Select a subelement such as a face or edge."
+            )
+
+            return
+
+        controlled_obj = selection.Object
+        controlled_sub = selection.SubElementNames[0]
+
+        datum_systems = get_datum_system_objects(doc)
+
+        if not datum_systems:
+
+            QtGui.QMessageBox.warning(
+                None,
+                "Feature Control Frame",
+                "No datum systems exist."
+            )
+
+            return
+
+        tolerance, ok = QtGui.QInputDialog.getDouble(
+            None,
+            "Tolerance Value",
+            "Enter tolerance value:",
+            0.1,
+            0.0001,
+            9999,
+            4
+        )
+
+        if not ok:
+            return
+
+        names = [obj.Name for obj in datum_systems]
+
+        ds_name, ok = QtGui.QInputDialog.getItem(
+            None,
+            "Datum System",
+            "Select datum system:",
+            names,
+            0,
+            False
+        )
+
+        if not ok:
+            return
+
+        datum_system = doc.getObject(ds_name)
+
+        fcf_obj = doc.addObject(
+            "App::FeaturePython",
+            "MBD_FCF_Position"
+        )
+
+        MBDFeatureControlFrame(fcf_obj)
+
+        fcf_obj.ToleranceType = "Position"
+        fcf_obj.ToleranceValue = tolerance
+
+        fcf_obj.DatumSystem = datum_system
+
+        fcf_obj.ControlledObject = controlled_obj
+        fcf_obj.ControlledSubelement = controlled_sub
+
+        if FreeCAD.GuiUp:
+            ViewProviderMBDFeatureControlFrame(
+                fcf_obj.ViewObject
+            )
+
+        doc.recompute()
+
+        FreeCAD.Console.PrintMessage(
+            "Created position tolerance on {}.{}\n".format(
+                controlled_obj.Name,
+                controlled_sub
+            )
+        )
+
 FreeCADGui.addCommand("MBD_CreateDatumFeature", CreateDatumFeatureCommand())
 FreeCADGui.addCommand("MBD_ValidatePMI", ValidatePMICommand())
 FreeCADGui.addCommand(
@@ -298,4 +424,8 @@ FreeCADGui.addCommand(
 FreeCADGui.addCommand(
     "MBD_CreateDatumSystem",
     CreateDatumSystemCommand()
+)
+FreeCADGui.addCommand(
+    "MBD_CreateFeatureControlFrame",
+    CreateFeatureControlFrameCommand()
 )
