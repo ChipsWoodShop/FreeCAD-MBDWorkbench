@@ -20,6 +20,7 @@ from MBDFeatureControlFrame import (
     MBDFeatureControlFrame,
     ViewProviderMBDFeatureControlFrame
 )
+import MBDExporter
 VALID_DATUM_LETTERS = [
     "A","B","C","D","E","F","G","H",
     "J","K","L","M","N",
@@ -414,6 +415,47 @@ class CreateFeatureControlFrameCommand:
                 controlled_sub
             )
         )
+class ExportAP242Command:
+
+    def GetResources(self):
+        return {
+            "MenuText": "Export AP242",
+            "ToolTip": "Export AP242 STEP with semantic infrastructure",
+            "Pixmap": ""
+        }
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+
+        filename, _ = QtGui.QFileDialog.getSaveFileName(
+            None,
+            "Export AP242",
+            "",
+            "STEP Files (*.step *.stp)"
+        )
+
+        if not filename:
+            return
+
+        try:
+
+            MBDExporter.export_ap242(filename)
+
+            QtGui.QMessageBox.information(
+                None,
+                "AP242 Export",
+                "Export complete."
+            )
+
+        except Exception as e:
+
+            QtGui.QMessageBox.critical(
+                None,
+                "AP242 Export Failed",
+                str(e)
+            )
 
 FreeCADGui.addCommand("MBD_CreateDatumFeature", CreateDatumFeatureCommand())
 FreeCADGui.addCommand("MBD_ValidatePMI", ValidatePMICommand())
@@ -428,4 +470,8 @@ FreeCADGui.addCommand(
 FreeCADGui.addCommand(
     "MBD_CreateFeatureControlFrame",
     CreateFeatureControlFrameCommand()
+)
+FreeCADGui.addCommand(
+    "MBD_ExportAP242",
+    ExportAP242Command()
 )
