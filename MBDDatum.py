@@ -1,7 +1,7 @@
 # MBDDatum.py
 
 import FreeCAD
-
+import json
 
 class MBDDatumFeature:
     """
@@ -94,6 +94,20 @@ class MBDDatumFeature:
             "GeometrySignature",
             "Underlying geometry type"
         )
+        obj.addProperty(
+            "App::PropertyString",
+            "GeometrySignature",
+            "MBD",
+            "Stored geometric signature of referenced feature"
+        )
+
+        obj.addProperty(
+            "App::PropertyBool",
+            "GeometrySignatureValid",
+            "MBD",
+            "Whether current referenced geometry matches stored signature"
+        )
+        obj.GeometrySignatureValid = True
     def execute(self, obj):
         pass
 
@@ -133,45 +147,61 @@ def update_geometry_signature(obj):
 
     target = None
 
-    if sub.startswith("Face"):
-        idx = int(sub[4:]) - 1
-        target = shape.Faces[idx]
-
-    elif sub.startswith("Edge"):
-        idx = int(sub[4:]) - 1
-        target = shape.Edges[idx]
-
-    elif sub.startswith("Vertex"):
-        idx = int(sub[6:]) - 1
-        target = shape.Vertexes[idx]
+    try:
+        target = shape.getElement(sub)
+    except Exception:
+        target = None
 
     if target is None:
         return
 
+    signature = {
+        "ReferencedObjectName": obj.ReferencedObject.Name,
+        "ReferencedSubelement": sub,
+        "GeometryType": "Unknown",
+    }
+
     try:
         obj.CenterOfMass = target.CenterOfMass
-    except:
+        signature["CenterOfMass"] = [
+            round(target.CenterOfMass.x, 6),
+            round(target.CenterOfMass.y, 6),
+            round(target.CenterOfMass.z, 6),
+        ]
+    except Exception:
         pass
 
     try:
         obj.Area = target.Area
-    except:
+        signature["Area"] = round(target.Area, 6)
+    except Exception:
         pass
 
     try:
         if sub.startswith("Face"):
             obj.FacePerimeter = target.Length
+            signature["FacePerimeter"] = round(target.Length, 6)
         elif sub.startswith("Edge"):
             obj.EdgeLength = target.Length
-    except:
+            signature["EdgeLength"] = round(target.Length, 6)
+    except Exception:
         pass
 
     try:
         surf = target.Surface
         obj.GeometryType = surf.__class__.__name__
-    except:
+        signature["GeometryType"] = obj.GeometryType
+    except Exception:
         try:
             curve = target.Curve
             obj.GeometryType = curve.__class__.__name__
-        except:
+            signature["GeometryType"] = obj.GeometryType
+        except Exception:
             obj.GeometryType = "Unknown"
+            signature["GeometryType"] = "Unknown"
+
+    try:
+        obj.GeometrySignature = json.dumps(signature, sort_keys=True)
+        obj.GeometrySignatureValid = True
+    except Exception:
+        obj.GeometrySignatureValid = False

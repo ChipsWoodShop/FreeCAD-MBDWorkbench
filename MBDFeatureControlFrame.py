@@ -58,7 +58,55 @@ class MBDFeatureControlFrame:
             "MBD_FCF",
             "Controlled subelement"
         )
+        
+        obj.addProperty(
+            "App::PropertyLink",
+            "ReferencedObject",
+            "MBD",
+            "Object used for generic PMI geometry validation"
+        )
 
+        obj.addProperty(
+            "App::PropertyString",
+            "ReferencedSubelement",
+            "MBD",
+            "Subelement used for generic PMI geometry validation"
+        )
+
+        obj.addProperty(
+            "App::PropertyVector",
+            "CenterOfMass",
+            "GeometrySignature",
+            "Center of mass of referenced geometry"
+        )
+
+        obj.addProperty(
+            "App::PropertyFloat",
+            "Area",
+            "GeometrySignature",
+            "Area of referenced face"
+        )
+
+        obj.addProperty(
+            "App::PropertyFloat",
+            "FacePerimeter",
+            "GeometrySignature",
+            "Perimeter of referenced face"
+        )
+
+        obj.addProperty(
+            "App::PropertyFloat",
+            "EdgeLength",
+            "GeometrySignature",
+            "Length of referenced edge"
+        )
+
+        obj.addProperty(
+            "App::PropertyString",
+            "GeometryType",
+            "GeometrySignature",
+            "Underlying geometry type"
+        )
         obj.addProperty(
             "App::PropertyBool",
             "IsSemanticPMI",
@@ -76,7 +124,20 @@ class MBDFeatureControlFrame:
         )
 
         obj.Standard = "ASME Y14.5"
+        obj.addProperty(
+            "App::PropertyString",
+            "GeometrySignature",
+            "MBD",
+            "Stored geometric signature of referenced feature"
+        )
 
+        obj.addProperty(
+            "App::PropertyBool",
+            "GeometrySignatureValid",
+            "MBD",
+            "Whether current referenced geometry matches stored signature"
+        )
+        obj.GeometrySignatureValid = True
     def execute(self, obj):
         pass
 

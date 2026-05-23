@@ -2,6 +2,8 @@
 
 import FreeCAD
 import Part
+import json
+from PySide import QtGui
 
 from OCC.Core.TDocStd import TDocStd_Document
 from OCC.Core.XCAFDoc import XCAFDoc_DocumentTool
@@ -130,11 +132,169 @@ def build_face_label_map(shape_tool, simple_label):
 
     return subshape_map
 
+def validate_pmi_geometry_signatures(doc):
+    issues = []
+
+    for obj in doc.Objects:
+        if not hasattr(obj, "IsSemanticPMI") or not obj.IsSemanticPMI:
+            continue
+
+        if not hasattr(obj, "ReferencedObject"):
+            continue
+
+        if not hasattr(obj, "ReferencedSubelement"):
+            continue
+
+        if not hasattr(obj, "GeometrySignature"):
+            continue
+
+        if not obj.GeometrySignature:
+            continue
+
+        try:
+            old_sig = json.loads(obj.GeometrySignature)
+        except Exception as e:
+            issues.append(
+                "{}: stored geometry signature could not be parsed: {}".format(
+                    obj.Label,
+                    e
+                )
+            )
+            obj.GeometrySignatureValid = False
+            continue
+
+        ref_obj = obj.ReferencedObject
+        sub = obj.ReferencedSubelement
+
+        try:
+            target = ref_obj.Shape.getElement(sub)
+        except Exception as e:
+            issues.append(
+                "{}: referenced subelement {} could not be resolved: {}".format(
+                    obj.Label,
+                    sub,
+                    e
+                )
+            )
+            obj.GeometrySignatureValid = False
+            continue
+
+        warnings = []
+
+        try:
+            new_com = [
+                round(target.CenterOfMass.x, 6),
+                round(target.CenterOfMass.y, 6),
+                round(target.CenterOfMass.z, 6),
+            ]
+
+            old_com = old_sig.get("CenterOfMass")
+            if old_com:
+                dx = new_com[0] - old_com[0]
+                dy = new_com[1] - old_com[1]
+                dz = new_com[2] - old_com[2]
+                dist = (dx * dx + dy * dy + dz * dz) ** 0.5
+
+                if dist > 0.5:
+                    warnings.append(
+                        "center of mass moved {:.3f} mm".format(dist)
+                    )
+        except Exception:
+            pass
+
+        try:
+            old_area = old_sig.get("Area")
+            new_area = target.Area
+
+            if old_area:
+                pct = abs(new_area - old_area) / old_area * 100.0
+
+                if pct > 5.0:
+                    warnings.append(
+                        "area changed by {:.1f}%".format(pct)
+                    )
+        except Exception:
+            pass
+
+        try:
+            old_type = old_sig.get("GeometryType")
+            new_type = "Unknown"
+
+            try:
+                new_type = target.Surface.__class__.__name__
+            except Exception:
+                try:
+                    new_type = target.Curve.__class__.__name__
+                except Exception:
+                    pass
+
+            if old_type and old_type != new_type:
+                warnings.append(
+                    "geometry type changed from {} to {}".format(
+                        old_type,
+                        new_type
+                    )
+                )
+        except Exception:
+            pass
+
+        if warnings:
+            obj.GeometrySignatureValid = False
+            for warning in warnings:
+                issues.append(
+                    "{} on {}: {}".format(
+                        obj.Label,
+                        sub,
+                        warning
+                    )
+                )
+        else:
+            obj.GeometrySignatureValid = True
+
+    return issues
 
 def export_ap242(filepath):
 
     doc = FreeCAD.ActiveDocument
+    validation_issues = validate_pmi_geometry_signatures(doc)
+    msg = QtGui.QMessageBox()
+    msg.setIcon(QtGui.QMessageBox.Warning)
 
+    msg.setWindowTitle("MBD Attachment Validation")
+
+    msg.setText(
+        "Potential stale PMI attachments were detected."
+    )
+
+    msg.setInformativeText(
+        "\n".join(validation_issues[:10]) +
+        "\n\nContinue AP242 export anyway?"
+    )
+
+    msg.setStandardButtons(
+        QtGui.QMessageBox.Yes | QtGui.QMessageBox.Cancel
+    )
+
+    result = msg.exec_()
+
+    if result != QtGui.QMessageBox.Yes:
+        FreeCAD.Console.PrintWarning(
+            "AP242 export cancelled by user.\n"
+        )
+        return
+    if validation_issues:
+        FreeCAD.Console.PrintWarning(
+            "\nMBD geometry attachment validation warnings:\n"
+        )
+
+        for issue in validation_issues:
+            FreeCAD.Console.PrintWarning(
+                "  - {}\n".format(issue)
+            )
+
+        FreeCAD.Console.PrintWarning(
+            "PMI export will continue, but affected datum/FCF attachments should be reviewed.\n\n"
+        )
     if doc is None:
         raise Exception("No active document.")
 

@@ -401,6 +401,9 @@ class CreateFeatureControlFrameCommand:
 
         fcf_obj.ControlledObject = controlled_obj
         fcf_obj.ControlledSubelement = controlled_sub
+        fcf_obj.ReferencedObject = controlled_obj
+        fcf_obj.ReferencedSubelement = controlled_sub
+        update_geometry_signature(fcf_obj)
 
         if FreeCAD.GuiUp:
             ViewProviderMBDFeatureControlFrame(
