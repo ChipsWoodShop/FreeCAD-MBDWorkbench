@@ -28,6 +28,12 @@ from OCC.Core.XCAFDoc import XCAFDoc_Datum
 from OCC.Core.StepData import StepData_ConfParameters
 from OCC.Core.XCAFDoc import XCAFDoc_Datum
 from OCC.Core.XCAFDimTolObjects import XCAFDimTolObjects_DatumObject
+from OCC.Core.XCAFDimTolObjects import XCAFDimTolObjects_GeomToleranceObject
+import OCC.Core.XCAFDimTolObjects as XDTO
+from OCC.Core.TDataStd import (
+    TDataStd_Integer,
+    TDataStd_Real
+)
 
 def should_export_shape_object(obj):
     if not hasattr(obj, "Shape"):
@@ -368,7 +374,8 @@ def export_ap242(filepath):
                         shape_type_name(sh)
                     )
                 )
-    
+        datum_label_map = {}
+
         for pmi_obj in doc.Objects:
 
             if not hasattr(pmi_obj, "IsSemanticPMI"):
@@ -422,7 +429,8 @@ def export_ap242(filepath):
 
             datum_attr.SetObject(datum_obj)
 
-            
+            datum_label_map[datum_name] = datum_label
+
             shape_labels = TDF_LabelSequence()
 
             shape_labels.Append(face_label)
@@ -443,7 +451,136 @@ def export_ap242(filepath):
                 obj.Name
             )
         )
+        for pmi_obj in doc.Objects:
 
+            if not hasattr(pmi_obj, "ToleranceType"):
+                continue
+
+            if not hasattr(pmi_obj, "ControlledObject"):
+                continue
+
+            if not hasattr(pmi_obj, "ControlledSubelement"):
+                continue
+
+            subname = pmi_obj.ControlledSubelement
+
+            if subname not in face_label_map:
+                FreeCAD.Console.PrintWarning(
+                    "FCF controlled subshape {} not found in subshape map.\n".format(
+                        subname
+                    )
+                )
+                continue
+
+            controlled_label = face_label_map[subname]
+
+            FreeCAD.Console.PrintMessage(
+                "Creating experimental geom tolerance on {}\n".format(
+                    subname
+                )
+            )
+
+            geomtol_label = dimtol_tool.AddGeomTolerance()
+
+            # ChildLab enum values from XCAFDoc_GeomTolerance.cxx
+            ChildLab_Type = 1
+            ChildLab_TypeOfValue = 2
+            ChildLab_Value = 3
+            ChildLab_MatReqModif = 4
+            ChildLab_ZoneModif = 5
+
+            # Position tolerance
+            TDataStd_Integer.Set(
+                geomtol_label.FindChild(ChildLab_Type),
+                int(XDTO.XCAFDimTolObjects_GeomToleranceType_Position)
+            )
+
+            # Diameter tolerance zone
+            if pmi_obj.DiameterZone:
+                TDataStd_Integer.Set(
+                    geomtol_label.FindChild(ChildLab_TypeOfValue),
+                    int(XDTO.XCAFDimTolObjects_GeomToleranceTypeValue_Diameter)
+                )
+
+            # Tolerance numeric value
+            TDataStd_Real.Set(
+                geomtol_label.FindChild(ChildLab_Value),
+                float(pmi_obj.ToleranceValue)
+            )
+
+            # Material modifier = none
+            TDataStd_Integer.Set(
+                geomtol_label.FindChild(ChildLab_MatReqModif),
+                int(XDTO.XCAFDimTolObjects_GeomToleranceMatReqModif_None)
+            )
+
+            # Zone modifier = none
+            TDataStd_Integer.Set(
+                geomtol_label.FindChild(ChildLab_ZoneModif),
+                int(XDTO.XCAFDimTolObjects_GeomToleranceZoneModif_None)
+            )
+
+            FreeCAD.Console.PrintMessage(
+                "Configured semantic position tolerance value {}\n".format(
+                    pmi_obj.ToleranceValue
+                )
+            )
+            
+            FreeCAD.Console.PrintMessage(
+                "Geom tolerance label null: {}, is geomtol: {}\n".format(
+                    geomtol_label.IsNull(),
+                    dimtol_tool.IsGeomTolerance(geomtol_label)
+                )
+            )
+
+            dimtol_tool.SetGeomTolerance(
+                controlled_label,
+                geomtol_label
+            )
+
+            FreeCAD.Console.PrintMessage(
+                "Attached experimental geom tolerance to {}\n".format(
+                    subname
+                )
+            )
+
+            if hasattr(pmi_obj, "DatumSystem") and pmi_obj.DatumSystem:
+
+                ds = pmi_obj.DatumSystem
+
+                for datum_ref_name in [
+                    "PrimaryDatum",
+                    "SecondaryDatum",
+                    "TertiaryDatum"
+                ]:
+                    if not hasattr(ds, datum_ref_name):
+                        continue
+
+                    datum_obj = getattr(ds, datum_ref_name)
+
+                    if not datum_obj:
+                        continue
+
+                    datum_label_text = datum_obj.DatumLabel
+
+                    if datum_label_text not in datum_label_map:
+                        FreeCAD.Console.PrintWarning(
+                            "Datum {} not found in datum_label_map.\n".format(
+                                datum_label_text
+                            )
+                        )
+                        continue
+
+                    dimtol_tool.SetDatumToGeomTol(
+                        datum_label_map[datum_label_text],
+                        geomtol_label
+                    )
+
+                    FreeCAD.Console.PrintMessage(
+                        "Linked datum {} to experimental geom tolerance.\n".format(
+                            datum_label_text
+                        )
+                    )
         exported_count += 1
     Interface_Static.SetCVal("write.step.schema", "AP242DIS")
     Interface_Static.SetIVal("write.step.schema", 5)
