@@ -3,6 +3,8 @@
 import FreeCAD
 import json
 
+from MBDPMI import ensure_pmi_identity
+
 class MBDDatumFeature:
     """
     Semantic datum feature object.
@@ -108,6 +110,7 @@ class MBDDatumFeature:
             "Whether current referenced geometry matches stored signature"
         )
         obj.GeometrySignatureValid = True
+        ensure_pmi_identity(obj, "datum-created")
     def execute(self, obj):
         pass
 

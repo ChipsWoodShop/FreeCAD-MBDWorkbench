@@ -2,6 +2,8 @@
 
 import FreeCAD
 
+from MBDPMI import ensure_pmi_identity
+
 
 class MBDFeatureControlFrame:
 
@@ -138,6 +140,7 @@ class MBDFeatureControlFrame:
             "Whether current referenced geometry matches stored signature"
         )
         obj.GeometrySignatureValid = True
+        ensure_pmi_identity(obj, "fcf-created")
     def execute(self, obj):
         pass
 

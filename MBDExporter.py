@@ -1,39 +1,39 @@
 # MBDExporter.py
 
+import json
+
 import FreeCAD
 import Part
-import json
 from PySide import QtGui
 
+from OCC.Core.TCollection import TCollection_HAsciiString
+from OCC.Core.TDataStd import TDataStd_Integer, TDataStd_Real
+from OCC.Core.TDF import TDF_Label, TDF_LabelSequence
 from OCC.Core.TDocStd import TDocStd_Document
-from OCC.Core.XCAFDoc import XCAFDoc_DocumentTool
-from OCC.Core.STEPCAFControl import STEPCAFControl_Writer
-from OCC.Core.Interface import Interface_Static
-from OCC.Core.IFSelect import IFSelect_RetDone
+from OCC.Core.TopoDS import topods
 from OCC.Core.TopAbs import (
     TopAbs_COMPOUND,
     TopAbs_COMPSOLID,
-    TopAbs_SOLID,
-    TopAbs_SHELL,
     TopAbs_FACE,
+    TopAbs_SHELL,
+    TopAbs_SOLID,
 )
 from OCC.Core.TopExp import TopExp_Explorer
-from OCC.Core.TopoDS import topods
-from OCC.Core.TDF import TDF_Label
-from OCC.Core.XCAFDoc import XCAFDoc_DocumentTool
-from OCC.Core.TCollection import TCollection_HAsciiString
-from OCC.Core.TDF import TDF_LabelSequence
-from OCC.Core.TDF import TDF_LabelSequence, TDF_Tool
-from OCC.Core.XCAFDoc import XCAFDoc_Datum
+from OCC.Core.IFSelect import IFSelect_RetDone
+from OCC.Core.Interface import Interface_Static
+from OCC.Core.STEPCAFControl import STEPCAFControl_Writer
 from OCC.Core.StepData import StepData_ConfParameters
-from OCC.Core.XCAFDoc import XCAFDoc_Datum
 from OCC.Core.XCAFDimTolObjects import XCAFDimTolObjects_DatumObject
-from OCC.Core.XCAFDimTolObjects import XCAFDimTolObjects_GeomToleranceObject
 import OCC.Core.XCAFDimTolObjects as XDTO
-from OCC.Core.TDataStd import (
-    TDataStd_Integer,
-    TDataStd_Real
-)
+from OCC.Core.XCAFDoc import XCAFDoc_Datum, XCAFDoc_DocumentTool
+
+
+GEOMTOL_CHILD_TYPE = 1
+GEOMTOL_CHILD_TYPE_OF_VALUE = 2
+GEOMTOL_CHILD_VALUE = 3
+GEOMTOL_CHILD_MATERIAL_REQUIREMENT = 4
+GEOMTOL_CHILD_ZONE_MODIFIER = 5
+
 
 def should_export_shape_object(obj):
     if not hasattr(obj, "Shape"):
@@ -50,7 +50,7 @@ def should_export_shape_object(obj):
     if len(shape.Solids) == 0:
         return False
 
-    # Prefer exporting PartDesign Body, not its internal features
+    # Prefer exporting PartDesign Body, not its internal features.
     if obj.TypeId.startswith("PartDesign::") and obj.TypeId != "PartDesign::Body":
         return False
 
@@ -66,6 +66,26 @@ def shape_type_name(shape):
         TopAbs_FACE: "FACE",
     }
     return names.get(shape.ShapeType(), str(shape.ShapeType()))
+
+
+def configure_step_ap242():
+    Interface_Static.SetCVal(
+        "write.step.schema",
+        "AP242DIS"
+    )
+    Interface_Static.SetIVal("write.step.schema", 5)
+
+
+def create_xcaf_document():
+    xcaf_doc = TDocStd_Document("pythonocc-xcaf")
+    shape_tool = XCAFDoc_DocumentTool.ShapeTool(
+        xcaf_doc.Main()
+    )
+    dimtol_tool = XCAFDoc_DocumentTool.DimTolTool(
+        xcaf_doc.Main()
+    )
+
+    return xcaf_doc, shape_tool, dimtol_tool
 
 
 def get_simple_shape_label(shape_tool, root_label):
@@ -91,6 +111,31 @@ def get_simple_shape_label(shape_tool, root_label):
     return root_label
 
 
+def export_body_shape(shape_tool, obj):
+    shape = obj.Shape
+    occ_shape = Part.__toPythonOCC__(shape)
+
+    root_label = shape_tool.AddShape(
+        occ_shape,
+        False,
+        False
+    )
+
+    simple_label = get_simple_shape_label(
+        shape_tool,
+        root_label
+    )
+
+    FreeCAD.Console.PrintMessage(
+        "Export object: {}\n".format(obj.Name)
+    )
+    FreeCAD.Console.PrintMessage(
+        "OCCT shape type: {}\n".format(shape_type_name(occ_shape))
+    )
+
+    return root_label, simple_label
+
+
 def build_face_label_map(shape_tool, simple_label):
     """
     Build a map:
@@ -102,41 +147,211 @@ def build_face_label_map(shape_tool, simple_label):
     """
 
     subshape_map = {}
-
     stored_shape = shape_tool.GetShape(simple_label)
-
     exp = TopExp_Explorer(stored_shape, TopAbs_FACE)
-
     face_index = 1
 
     while exp.More():
-
         face = topods.Face(exp.Current())
-
         added_label = TDF_Label()
 
-        added = shape_tool.AddSubShape(
+        shape_tool.AddSubShape(
             simple_label,
             face,
             added_label
         )
 
         subname = "Face{}".format(face_index)
-
         subshape_map[subname] = added_label
-
-        FreeCAD.Console.PrintMessage(
-            "Mapped {} -> added: {}, null: {}\n".format(
-                subname,
-                added,
-                added_label.IsNull()
-            )
-        )
 
         face_index += 1
         exp.Next()
 
     return subshape_map
+
+
+def iter_semantic_datums(doc):
+    for obj in doc.Objects:
+        if not hasattr(obj, "IsSemanticPMI"):
+            continue
+
+        if not obj.IsSemanticPMI:
+            continue
+
+        if obj.TypeId != "App::FeaturePython":
+            continue
+
+        if hasattr(obj, "DatumLabel"):
+            yield obj
+
+
+def iter_feature_control_frames(doc):
+    for obj in doc.Objects:
+        if not hasattr(obj, "ToleranceType"):
+            continue
+
+        if not hasattr(obj, "ControlledObject"):
+            continue
+
+        if not hasattr(obj, "ControlledSubelement"):
+            continue
+
+        yield obj
+
+
+def export_datums(doc, dimtol_tool, face_label_map):
+    datum_label_map = {}
+
+    for pmi_obj in iter_semantic_datums(doc):
+        subname = pmi_obj.ReferencedSubelement
+
+        if subname not in face_label_map:
+            FreeCAD.Console.PrintWarning(
+                "No face label found for {}\n".format(subname)
+            )
+            continue
+
+        face_label = face_label_map[subname]
+        datum_name = str(pmi_obj.DatumLabel)
+
+        FreeCAD.Console.PrintMessage(
+            "Creating semantic datum {} on {}\n".format(
+                datum_name,
+                subname
+            )
+        )
+
+        datum_label = dimtol_tool.AddDatum()
+        datum_attr = XCAFDoc_Datum.Set(datum_label)
+        datum_obj = XCAFDimTolObjects_DatumObject()
+
+        datum_obj.SetName(
+            TCollection_HAsciiString(datum_name)
+        )
+        datum_obj.SetSemanticName(
+            TCollection_HAsciiString("Datum {}".format(datum_name))
+        )
+        datum_obj.SetPosition(1)
+
+        datum_attr.SetObject(datum_obj)
+        datum_label_map[datum_name] = datum_label
+
+        shape_labels = TDF_LabelSequence()
+        shape_labels.Append(face_label)
+
+        dimtol_tool.SetDatum(
+            shape_labels,
+            datum_label
+        )
+
+    return datum_label_map
+
+
+def configure_position_tolerance(geomtol_label, pmi_obj):
+    # pythonocc does not expose XCAFDoc_GeomTolerance.SetObject()
+    # reliably here, so populate the child labels used by OCCT.
+    TDataStd_Integer.Set(
+        geomtol_label.FindChild(GEOMTOL_CHILD_TYPE),
+        int(XDTO.XCAFDimTolObjects_GeomToleranceType_Position)
+    )
+
+    if pmi_obj.DiameterZone:
+        TDataStd_Integer.Set(
+            geomtol_label.FindChild(GEOMTOL_CHILD_TYPE_OF_VALUE),
+            int(XDTO.XCAFDimTolObjects_GeomToleranceTypeValue_Diameter)
+        )
+
+    TDataStd_Real.Set(
+        geomtol_label.FindChild(GEOMTOL_CHILD_VALUE),
+        float(pmi_obj.ToleranceValue)
+    )
+
+    TDataStd_Integer.Set(
+        geomtol_label.FindChild(GEOMTOL_CHILD_MATERIAL_REQUIREMENT),
+        int(XDTO.XCAFDimTolObjects_GeomToleranceMatReqModif_None)
+    )
+
+    TDataStd_Integer.Set(
+        geomtol_label.FindChild(GEOMTOL_CHILD_ZONE_MODIFIER),
+        int(XDTO.XCAFDimTolObjects_GeomToleranceZoneModif_None)
+    )
+
+
+def export_feature_control_frames(doc, dimtol_tool, face_label_map, datum_label_map):
+    for pmi_obj in iter_feature_control_frames(doc):
+        subname = pmi_obj.ControlledSubelement
+
+        if subname not in face_label_map:
+            FreeCAD.Console.PrintWarning(
+                "FCF controlled subshape {} not found in subshape map.\n".format(
+                    subname
+                )
+            )
+            continue
+
+        controlled_label = face_label_map[subname]
+
+        FreeCAD.Console.PrintMessage(
+            "Creating semantic geom tolerance on {}\n".format(
+                subname
+            )
+        )
+
+        geomtol_label = dimtol_tool.AddGeomTolerance()
+        configure_position_tolerance(geomtol_label, pmi_obj)
+
+        dimtol_tool.SetGeomTolerance(
+            controlled_label,
+            geomtol_label
+        )
+
+        link_datum_system_to_geom_tolerance(
+            dimtol_tool,
+            pmi_obj,
+            datum_label_map,
+            geomtol_label
+        )
+
+
+def link_datum_system_to_geom_tolerance(
+    dimtol_tool,
+    pmi_obj,
+    datum_label_map,
+    geomtol_label
+):
+    if not hasattr(pmi_obj, "DatumSystem") or not pmi_obj.DatumSystem:
+        return
+
+    ds = pmi_obj.DatumSystem
+
+    for datum_ref_name in [
+        "PrimaryDatum",
+        "SecondaryDatum",
+        "TertiaryDatum"
+    ]:
+        if not hasattr(ds, datum_ref_name):
+            continue
+
+        datum_obj = getattr(ds, datum_ref_name)
+
+        if not datum_obj:
+            continue
+
+        datum_label_text = datum_obj.DatumLabel
+
+        if datum_label_text not in datum_label_map:
+            FreeCAD.Console.PrintWarning(
+                "Datum {} not found in datum_label_map.\n".format(
+                    datum_label_text
+                )
+            )
+            continue
+
+        dimtol_tool.SetDatumToGeomTol(
+            datum_label_map[datum_label_text],
+            geomtol_label
+        )
+
 
 def validate_pmi_geometry_signatures(doc):
     issues = []
@@ -259,370 +474,55 @@ def validate_pmi_geometry_signatures(doc):
 
     return issues
 
-def export_ap242(filepath):
 
-    doc = FreeCAD.ActiveDocument
-    validation_issues = validate_pmi_geometry_signatures(doc)
+def confirm_export_despite_warnings(validation_issues):
+    if not validation_issues:
+        return True
+
     msg = QtGui.QMessageBox()
     msg.setIcon(QtGui.QMessageBox.Warning)
-
     msg.setWindowTitle("MBD Attachment Validation")
-
     msg.setText(
         "Potential stale PMI attachments were detected."
     )
-
     msg.setInformativeText(
         "\n".join(validation_issues[:10]) +
         "\n\nContinue AP242 export anyway?"
     )
-
     msg.setStandardButtons(
         QtGui.QMessageBox.Yes | QtGui.QMessageBox.Cancel
     )
 
-    result = msg.exec_()
+    return msg.exec_() == QtGui.QMessageBox.Yes
 
-    if result != QtGui.QMessageBox.Yes:
-        FreeCAD.Console.PrintWarning(
-            "AP242 export cancelled by user.\n"
-        )
+
+def print_validation_warnings(validation_issues):
+    if not validation_issues:
         return
-    if validation_issues:
+
+    FreeCAD.Console.PrintWarning(
+        "\nMBD geometry attachment validation warnings:\n"
+    )
+
+    for issue in validation_issues:
         FreeCAD.Console.PrintWarning(
-            "\nMBD geometry attachment validation warnings:\n"
+            "  - {}\n".format(issue)
         )
 
-        for issue in validation_issues:
-            FreeCAD.Console.PrintWarning(
-                "  - {}\n".format(issue)
-            )
-
-        FreeCAD.Console.PrintWarning(
-            "PMI export will continue, but affected datum/FCF attachments should be reviewed.\n\n"
-        )
-    if doc is None:
-        raise Exception("No active document.")
-
-    Interface_Static.SetCVal(
-        "write.step.schema",
-        "AP242DIS"
+    FreeCAD.Console.PrintWarning(
+        "PMI export will continue, but affected datum/FCF attachments should be reviewed.\n\n"
     )
 
-    xcaf_doc = TDocStd_Document("pythonocc-xcaf")
 
-    shape_tool = XCAFDoc_DocumentTool.ShapeTool(
-        xcaf_doc.Main()
-    )
-    exported_count = 0
-
-    for obj in doc.Objects:
-
-        if not should_export_shape_object(obj):
-            continue
-
-        shape = obj.Shape
-        occ_shape = Part.__toPythonOCC__(shape)
-
-        root_label = shape_tool.AddShape(
-            occ_shape,
-            False,
-            False
-        )
-
-        simple_label = get_simple_shape_label(
-            shape_tool,
-            root_label
-        )
-
-        FreeCAD.Console.PrintMessage(
-            "Export object: {}\n".format(obj.Name)
-        )
-        FreeCAD.Console.PrintMessage(
-            "Root label null: {}\n".format(root_label.IsNull())
-        )
-        FreeCAD.Console.PrintMessage(
-            "Root is reference: {}\n".format(shape_tool.IsReference(root_label))
-        )
-        FreeCAD.Console.PrintMessage(
-            "Simple label null: {}\n".format(simple_label.IsNull())
-        )
-        FreeCAD.Console.PrintMessage(
-            "Simple is simple shape: {}\n".format(
-                shape_tool.IsSimpleShape(simple_label)
-            )
-        )
-        FreeCAD.Console.PrintMessage(
-            "OCCT shape type: {}\n".format(shape_type_name(occ_shape))
-        )
-
-        face_label_map = build_face_label_map(
-            shape_tool,
-            simple_label
-        )
-        dimtol_tool = XCAFDoc_DocumentTool.DimTolTool(
-            xcaf_doc.Main()
-        )
-        for subname in ["Face1", "Face4", "Face5"]:
-                lab = face_label_map[subname]
-                sh = shape_tool.GetShape(lab)
-                FreeCAD.Console.PrintMessage(
-                    "{} label null: {}, shape null: {}, shape type: {}\n".format(
-                        subname,
-                        lab.IsNull(),
-                        sh.IsNull(),
-                        shape_type_name(sh)
-                    )
-                )
-        datum_label_map = {}
-
-        for pmi_obj in doc.Objects:
-
-            if not hasattr(pmi_obj, "IsSemanticPMI"):
-                continue
-
-            if not pmi_obj.IsSemanticPMI:
-                continue
-
-            if pmi_obj.TypeId != "App::FeaturePython":
-                continue
-
-            if not hasattr(pmi_obj, "DatumLabel"):
-                continue
-
-            subname = pmi_obj.ReferencedSubelement
-
-            if subname not in face_label_map:
-
-                FreeCAD.Console.PrintWarning(
-                    "No face label found for {}\n".format(subname)
-                )
-
-                continue
-
-            face_label = face_label_map[subname]
-
-            datum_name = str(pmi_obj.DatumLabel)
-
-            FreeCAD.Console.PrintMessage(
-                "Creating semantic datum {} on {}\n".format(
-                    datum_name,
-                    subname
-                )
-            )
-
-            datum_label = dimtol_tool.AddDatum()
-
-            datum_attr = XCAFDoc_Datum.Set(datum_label)
-
-            datum_obj = XCAFDimTolObjects_DatumObject()
-
-            datum_obj.SetName(
-                TCollection_HAsciiString(datum_name)
-            )
-
-            datum_obj.SetSemanticName(
-                TCollection_HAsciiString("Datum {}".format(datum_name))
-            )
-
-            datum_obj.SetPosition(1)
-
-            datum_attr.SetObject(datum_obj)
-
-            datum_label_map[datum_name] = datum_label
-
-            shape_labels = TDF_LabelSequence()
-
-            shape_labels.Append(face_label)
-            FreeCAD.Console.PrintMessage(
-                "Attaching datum {} to {} label null: {}\n".format(
-                    datum_name,
-                    subname,
-                    face_label.IsNull()
-                )
-            )
-            dimtol_tool.SetDatum(
-                shape_labels,
-                datum_label
-            )
-        FreeCAD.Console.PrintMessage(
-            "Mapped {} face labels for {}\n".format(
-                len(face_label_map),
-                obj.Name
-            )
-        )
-        for pmi_obj in doc.Objects:
-
-            if not hasattr(pmi_obj, "ToleranceType"):
-                continue
-
-            if not hasattr(pmi_obj, "ControlledObject"):
-                continue
-
-            if not hasattr(pmi_obj, "ControlledSubelement"):
-                continue
-
-            subname = pmi_obj.ControlledSubelement
-
-            if subname not in face_label_map:
-                FreeCAD.Console.PrintWarning(
-                    "FCF controlled subshape {} not found in subshape map.\n".format(
-                        subname
-                    )
-                )
-                continue
-
-            controlled_label = face_label_map[subname]
-
-            FreeCAD.Console.PrintMessage(
-                "Creating experimental geom tolerance on {}\n".format(
-                    subname
-                )
-            )
-
-            geomtol_label = dimtol_tool.AddGeomTolerance()
-
-            # ChildLab enum values from XCAFDoc_GeomTolerance.cxx
-            ChildLab_Type = 1
-            ChildLab_TypeOfValue = 2
-            ChildLab_Value = 3
-            ChildLab_MatReqModif = 4
-            ChildLab_ZoneModif = 5
-
-            # Position tolerance
-            TDataStd_Integer.Set(
-                geomtol_label.FindChild(ChildLab_Type),
-                int(XDTO.XCAFDimTolObjects_GeomToleranceType_Position)
-            )
-
-            # Diameter tolerance zone
-            if pmi_obj.DiameterZone:
-                TDataStd_Integer.Set(
-                    geomtol_label.FindChild(ChildLab_TypeOfValue),
-                    int(XDTO.XCAFDimTolObjects_GeomToleranceTypeValue_Diameter)
-                )
-
-            # Tolerance numeric value
-            TDataStd_Real.Set(
-                geomtol_label.FindChild(ChildLab_Value),
-                float(pmi_obj.ToleranceValue)
-            )
-
-            # Material modifier = none
-            TDataStd_Integer.Set(
-                geomtol_label.FindChild(ChildLab_MatReqModif),
-                int(XDTO.XCAFDimTolObjects_GeomToleranceMatReqModif_None)
-            )
-
-            # Zone modifier = none
-            TDataStd_Integer.Set(
-                geomtol_label.FindChild(ChildLab_ZoneModif),
-                int(XDTO.XCAFDimTolObjects_GeomToleranceZoneModif_None)
-            )
-
-            FreeCAD.Console.PrintMessage(
-                "Configured semantic position tolerance value {}\n".format(
-                    pmi_obj.ToleranceValue
-                )
-            )
-            
-            FreeCAD.Console.PrintMessage(
-                "Geom tolerance label null: {}, is geomtol: {}\n".format(
-                    geomtol_label.IsNull(),
-                    dimtol_tool.IsGeomTolerance(geomtol_label)
-                )
-            )
-
-            dimtol_tool.SetGeomTolerance(
-                controlled_label,
-                geomtol_label
-            )
-
-            FreeCAD.Console.PrintMessage(
-                "Attached experimental geom tolerance to {}\n".format(
-                    subname
-                )
-            )
-
-            if hasattr(pmi_obj, "DatumSystem") and pmi_obj.DatumSystem:
-
-                ds = pmi_obj.DatumSystem
-
-                for datum_ref_name in [
-                    "PrimaryDatum",
-                    "SecondaryDatum",
-                    "TertiaryDatum"
-                ]:
-                    if not hasattr(ds, datum_ref_name):
-                        continue
-
-                    datum_obj = getattr(ds, datum_ref_name)
-
-                    if not datum_obj:
-                        continue
-
-                    datum_label_text = datum_obj.DatumLabel
-
-                    if datum_label_text not in datum_label_map:
-                        FreeCAD.Console.PrintWarning(
-                            "Datum {} not found in datum_label_map.\n".format(
-                                datum_label_text
-                            )
-                        )
-                        continue
-
-                    dimtol_tool.SetDatumToGeomTol(
-                        datum_label_map[datum_label_text],
-                        geomtol_label
-                    )
-
-                    FreeCAD.Console.PrintMessage(
-                        "Linked datum {} to experimental geom tolerance.\n".format(
-                            datum_label_text
-                        )
-                    )
-        exported_count += 1
-    Interface_Static.SetCVal("write.step.schema", "AP242DIS")
-    Interface_Static.SetIVal("write.step.schema", 5)
-
-    FreeCAD.Console.PrintMessage(
-        "write.step.schema CVal before writer: {}\n".format(
-            Interface_Static.CVal("write.step.schema")
-        )
-    )
-
-    FreeCAD.Console.PrintMessage(
-        "write.step.schema IVal before writer: {}\n".format(
-            Interface_Static.IVal("write.step.schema")
-        )
-    )
-
+def transfer_and_write_step(xcaf_doc, dimtol_tool, filepath):
     writer = STEPCAFControl_Writer()
-
-    FreeCAD.Console.PrintMessage(
-        "write.step.schema CVal after writer: {}\n".format(
-            Interface_Static.CVal("write.step.schema")
-        )
-    )
-
-    FreeCAD.Console.PrintMessage(
-        "write.step.schema IVal after writer: {}\n".format(
-            Interface_Static.IVal("write.step.schema")
-        )
-    )
-
     writer.SetDimTolMode(True)
     writer.SetNameMode(True)
     writer.SetPropsMode(True)
 
     params = StepData_ConfParameters()
-
     params.WriteSchema = (
         StepData_ConfParameters.WriteMode_StepSchema_AP242DIS
-    )
-
-    FreeCAD.Console.PrintMessage(
-        "params.WriteSchema: {}\n".format(params.WriteSchema)
     )
 
     ok = writer.Transfer(
@@ -630,21 +530,6 @@ def export_ap242(filepath):
         params
     )
 
-    FreeCAD.Console.PrintMessage(
-        "Transfer with explicit params returned: {}\n".format(ok)
-    )
-    FreeCAD.Console.PrintMessage(
-        "params.WriteSchema numeric: {}\n".format(
-            int(params.WriteSchema)
-        )
-    )
-    FreeCAD.Console.PrintMessage(
-        "AP242 enum numeric: {}\n".format(
-            int(
-                StepData_ConfParameters.WriteMode_StepSchema_AP242DIS
-            )
-        )
-    )
     datum_labels = TDF_LabelSequence()
     dimtol_tool.GetDatumLabels(datum_labels)
 
@@ -652,26 +537,6 @@ def export_ap242(filepath):
         "XCAF datum labels found: {}\n".format(datum_labels.Length())
     )
 
-    for i in range(datum_labels.Length()):
-        lab = datum_labels.Value(i + 1)
-        FreeCAD.Console.PrintMessage(
-            "XCAF datum {} label null: {}\n".format(
-                i + 1,
-                lab.IsNull()
-            )
-        )
-    for subname, face_label in face_label_map.items():
-        datum_seq = TDF_LabelSequence()
-        found = dimtol_tool.GetRefDatumLabel(face_label, datum_seq)
-
-        FreeCAD.Console.PrintMessage(
-            "{} datum refs found: {}, count: {}\n".format(
-                subname,
-                found,
-                datum_seq.Length()
-            )
-        )
-    
     if not ok:
         raise Exception("STEP transfer failed.")
 
@@ -679,6 +544,69 @@ def export_ap242(filepath):
 
     if status != IFSelect_RetDone:
         raise Exception("STEP write failed.")
+
+
+def export_ap242(filepath):
+    doc = FreeCAD.ActiveDocument
+
+    if doc is None:
+        raise Exception("No active document.")
+
+    validation_issues = validate_pmi_geometry_signatures(doc)
+
+    if not confirm_export_despite_warnings(validation_issues):
+        FreeCAD.Console.PrintWarning(
+            "AP242 export cancelled by user.\n"
+        )
+        return
+
+    print_validation_warnings(validation_issues)
+    configure_step_ap242()
+
+    xcaf_doc, shape_tool, dimtol_tool = create_xcaf_document()
+    exported_count = 0
+
+    for obj in doc.Objects:
+        if not should_export_shape_object(obj):
+            continue
+
+        _root_label, simple_label = export_body_shape(
+            shape_tool,
+            obj
+        )
+
+        face_label_map = build_face_label_map(
+            shape_tool,
+            simple_label
+        )
+
+        datum_label_map = export_datums(
+            doc,
+            dimtol_tool,
+            face_label_map
+        )
+
+        FreeCAD.Console.PrintMessage(
+            "Mapped {} face labels for {}\n".format(
+                len(face_label_map),
+                obj.Name
+            )
+        )
+
+        export_feature_control_frames(
+            doc,
+            dimtol_tool,
+            face_label_map,
+            datum_label_map
+        )
+
+        exported_count += 1
+
+    transfer_and_write_step(
+        xcaf_doc,
+        dimtol_tool,
+        filepath
+    )
 
     FreeCAD.Console.PrintMessage(
         "Exported {} shapes to {}\n".format(
