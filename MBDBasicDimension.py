@@ -109,6 +109,14 @@ class MBDBasicDimension:
 
         add_property_if_missing(
             obj,
+            "App::PropertyLink",
+            "DisplayTextBox",
+            "MBD_BasicDimension",
+            "Optional visible box around basic dimension text"
+        )
+
+        add_property_if_missing(
+            obj,
             "App::PropertyString",
             "GeometrySignature",
             "MBD",

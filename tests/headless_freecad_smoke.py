@@ -13,6 +13,8 @@ import Part
 
 import MBDExporter
 import MBDBasicDimension
+import MBDDimension
+import MBDValidation
 from MBDDatum import MBDDatumFeature, update_geometry_signature
 from MBDDatumSystem import MBDDatumSystem
 from MBDFeatureControlFrame import MBDFeatureControlFrame
@@ -189,6 +191,217 @@ def basic_dimension_projection_smoke():
     print("basic dimension projection passed")
 
 
+def semantic_dimension_smoke():
+    doc, box_obj = make_doc("MBDSemanticDimensionSmoke")
+
+    point_a = doc.addObject("Part::Feature", "PointA")
+    point_a.Shape = Part.Vertex(0, 0, 0)
+
+    point_b = doc.addObject("Part::Feature", "PointB")
+    point_b.Shape = Part.Vertex(25.4, 0, 0)
+    doc.recompute()
+
+    dim = doc.addObject("App::DocumentObjectGroupPython", "MBD_Dimension001")
+    MBDDimension.MBDDimension(dim)
+    dim.DimensionPurpose = "PlusMinus"
+    dim.DimensionKind = "Linear"
+    dim.MeasurementType = "X"
+    dim.NominalValue = 25.4
+    dim.UpperTolerance = 0.127
+    dim.LowerTolerance = 0.127
+    dim.ReferenceObject1 = point_a
+    dim.ReferenceObject2 = point_b
+    MBDDimension.update_dimension_signature(dim)
+
+    report = MBDValidation.validate_document_structured(doc)
+    issues = [
+        issue for issue in report["issues"]
+        if issue.obj is not None and issue.obj.Name == dim.Name
+    ]
+    measured_value = dim.MeasuredValue
+    dimension_count = len(report["dimensions"])
+    FreeCAD.closeDocument(doc.Name)
+
+    if abs(measured_value - 25.4) > 0.000001:
+        raise AssertionError("dimension measured value was not updated")
+
+    if dimension_count != 1:
+        raise AssertionError("semantic dimension was not reported")
+
+    if issues:
+        raise AssertionError(
+            "semantic dimension validation issues: {}".format(
+                "; ".join(issue.message for issue in issues)
+            )
+        )
+
+    print("semantic dimension smoke passed")
+
+
+def dimension_reference_patterns_smoke():
+    doc, box_obj = make_doc("MBDDimensionReferencePatternsSmoke")
+
+    parallel_pair = None
+    non_parallel_pair = None
+
+    normals = []
+
+    for index, face in enumerate(box_obj.Shape.Faces):
+        u_min, u_max, v_min, v_max = face.ParameterRange
+        normal = face.normalAt(
+            (u_min + u_max) * 0.5,
+            (v_min + v_max) * 0.5
+        )
+        normal.normalize()
+        normals.append((index + 1, normal))
+
+    for first_index, first_normal in normals:
+        for second_index, second_normal in normals:
+            if first_index >= second_index:
+                continue
+
+            cross = first_normal.cross(second_normal)
+
+            if cross.Length <= 0.000001 and parallel_pair is None:
+                parallel_pair = (first_index, second_index)
+
+            if cross.Length > 0.5 and non_parallel_pair is None:
+                non_parallel_pair = (first_index, second_index)
+
+    if parallel_pair is None or non_parallel_pair is None:
+        raise AssertionError("could not find expected box face pairs")
+
+    result = MBDDimension.measurement_from_references(
+        "Linear",
+        "Distance",
+        box_obj,
+        "Face{}".format(parallel_pair[0]),
+        box_obj,
+        "Face{}".format(parallel_pair[1])
+    )
+
+    if result["value"] is None:
+        raise AssertionError("parallel plane measurement failed")
+
+    if result["pattern"] != "PlaneToPlane":
+        raise AssertionError(
+            "parallel plane pattern was {}".format(result["pattern"])
+        )
+
+    result = MBDDimension.measurement_from_references(
+        "Linear",
+        "Distance",
+        box_obj,
+        "Face{}".format(non_parallel_pair[0]),
+        box_obj,
+        "Face{}".format(non_parallel_pair[1])
+    )
+
+    if result["value"] is not None:
+        raise AssertionError("non-parallel plane measurement should fail")
+
+    point = doc.addObject("Part::Feature", "Point")
+    point.Shape = Part.Vertex(25, 10, 15)
+    doc.recompute()
+
+    result = MBDDimension.measurement_from_references(
+        "Linear",
+        "Distance",
+        box_obj,
+        "Face{}".format(parallel_pair[0]),
+        point,
+        ""
+    )
+    FreeCAD.closeDocument(doc.Name)
+
+    if result["value"] is None:
+        raise AssertionError("plane-point measurement failed")
+
+    if result["pattern"] != "PlaneToPoint":
+        raise AssertionError(
+            "plane-point pattern was {}".format(result["pattern"])
+        )
+
+    print("dimension reference patterns passed")
+
+
+def cylinder_axis_dimension_smoke():
+    doc = FreeCAD.newDocument("MBDCylinderAxisDimensionSmoke")
+
+    cyl_a = doc.addObject("Part::Feature", "HoleLikeCylinderA")
+    cyl_a.Shape = Part.makeCylinder(5, 30, FreeCAD.Vector(0, 0, 0), FreeCAD.Vector(0, 0, 1))
+
+    cyl_b = doc.addObject("Part::Feature", "HoleLikeCylinderB")
+    cyl_b.Shape = Part.makeCylinder(5, 30, FreeCAD.Vector(20, 0, 0), FreeCAD.Vector(0, 0, 1))
+
+    cyl_skew = doc.addObject("Part::Feature", "SkewCylinder")
+    cyl_skew.Shape = Part.makeCylinder(5, 30, FreeCAD.Vector(0, 20, 0), FreeCAD.Vector(1, 0, 1))
+
+    doc.recompute()
+
+    def cylinder_face_name(obj):
+        for index, face in enumerate(obj.Shape.Faces):
+            try:
+                if "cylinder" in face.Surface.__class__.__name__.lower():
+                    return "Face{}".format(index + 1)
+            except Exception:
+                pass
+
+        raise AssertionError("no cylindrical face found on {}".format(obj.Name))
+
+    cyl_a_face = cylinder_face_name(cyl_a)
+    cyl_b_face = cylinder_face_name(cyl_b)
+    cyl_skew_face = cylinder_face_name(cyl_skew)
+
+    diameter = MBDDimension.measurement_from_references(
+        "Diameter",
+        "Distance",
+        cyl_a,
+        cyl_a_face,
+        None,
+        ""
+    )
+
+    if abs(diameter["value"] - 10.0) > 0.000001:
+        raise AssertionError("cylinder diameter was {}".format(diameter["value"]))
+
+    parallel = MBDDimension.measurement_from_references(
+        "Linear",
+        "Distance",
+        cyl_a,
+        cyl_a_face,
+        cyl_b,
+        cyl_b_face
+    )
+
+    if parallel["pattern"] != "AxisToAxisParallel":
+        raise AssertionError(
+            "parallel axis pattern was {}".format(parallel["pattern"])
+        )
+
+    if abs(parallel["value"] - 20.0) > 0.000001:
+        raise AssertionError("parallel axis distance was {}".format(parallel["value"]))
+
+    skew = MBDDimension.measurement_from_references(
+        "Linear",
+        "Distance",
+        cyl_a,
+        cyl_a_face,
+        cyl_skew,
+        cyl_skew_face
+    )
+
+    FreeCAD.closeDocument(doc.Name)
+
+    if skew["pattern"] != "AxisToAxisSkew":
+        raise AssertionError("skew axis pattern was {}".format(skew["pattern"]))
+
+    if skew["value"] is None:
+        raise AssertionError("skew axis distance was not resolved")
+
+    print("cylinder axis dimension patterns passed")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -199,6 +412,9 @@ def main():
             "fcf-diameter",
             "stale-cancel",
             "basic-dimension-projection",
+            "semantic-dimension",
+            "dimension-reference-patterns",
+            "cylinder-axis-dimensions",
         ],
         default="datum-only"
     )
@@ -214,6 +430,12 @@ def main():
 
     if args.mode == "basic-dimension-projection":
         basic_dimension_projection_smoke()
+    elif args.mode == "semantic-dimension":
+        semantic_dimension_smoke()
+    elif args.mode == "dimension-reference-patterns":
+        dimension_reference_patterns_smoke()
+    elif args.mode == "cylinder-axis-dimensions":
+        cylinder_axis_dimension_smoke()
     elif args.mode == "stale-cancel":
         stale_cancel_smoke(args.output)
     else:

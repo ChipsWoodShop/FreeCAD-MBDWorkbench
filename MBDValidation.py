@@ -4,6 +4,7 @@ import FreeCAD
 import json
 
 import MBDBasicDimension
+import MBDDimension
 import MBDDatumTarget
 from MBDPMI import ensure_pmi_identity, pmi_id
 
@@ -58,6 +59,17 @@ def is_mbd_basic_dimension(obj):
         hasattr(obj, "IsSemanticPMI")
         and hasattr(obj, "DimensionType")
         and hasattr(obj, "NominalValue")
+        and hasattr(obj, "ReferenceObject1")
+        and hasattr(obj, "ReferenceObject2")
+    )
+
+
+def is_mbd_dimension(obj):
+    return (
+        hasattr(obj, "IsSemanticPMI")
+        and hasattr(obj, "DimensionPurpose")
+        and hasattr(obj, "DimensionKind")
+        and hasattr(obj, "MeasurementType")
         and hasattr(obj, "ReferenceObject1")
         and hasattr(obj, "ReferenceObject2")
     )
@@ -173,7 +185,7 @@ def validate_basic_dimension(obj):
     if obj.ReferenceObject1 is None:
         errors.append("{} has no first reference.".format(obj.Name))
 
-    if obj.ReferenceObject2 is None:
+    if obj.ReferenceObject2 is None and str(obj.DimensionKind) == "Linear":
         errors.append("{} has no second reference.".format(obj.Name))
 
     if errors:
@@ -205,6 +217,79 @@ def validate_basic_dimension(obj):
                 measured
             )
         )
+
+    return errors
+
+
+def validate_dimension(obj):
+    errors = []
+
+    if obj.ReferenceObject1 is None:
+        errors.append("{} has no first reference.".format(obj.Name))
+
+    if obj.ReferenceObject2 is None and str(obj.DimensionKind) == "Linear":
+        errors.append("{} has no second reference.".format(obj.Name))
+
+    if str(obj.DimensionKind) not in ("Linear", "Diameter", "Radius"):
+        errors.append(
+            "{} uses unsupported dimension kind {}.".format(
+                obj.Name,
+                obj.DimensionKind
+            )
+        )
+
+    if errors:
+        return errors
+
+    measured = MBDDimension.measured_value_from_references(obj)
+
+    if measured is None:
+        errors.append(
+            "{} references do not resolve to a supported dimension.".format(
+                obj.Name
+            )
+        )
+        return errors
+
+    obj.MeasuredValue = measured
+
+    purpose = str(obj.DimensionPurpose)
+
+    if purpose in ("Basic", "Reference", "PlusMinus", "EqualBilateral"):
+        if abs(measured - obj.NominalValue) > obj.ValidationTolerance:
+            errors.append(
+                "{} nominal dimension {:.6f} differs from measured {:.6f}.".format(
+                    obj.Name,
+                    obj.NominalValue,
+                    measured
+                )
+            )
+
+    if purpose in ("PlusMinus", "EqualBilateral"):
+        if obj.UpperTolerance < 0 or obj.LowerTolerance < 0:
+            errors.append(
+                "{} bilateral tolerances must be non-negative.".format(
+                    obj.Name
+                )
+            )
+
+    if purpose == "Limits":
+        if obj.LowerLimit > obj.UpperLimit:
+            errors.append(
+                "{} lower limit is greater than upper limit.".format(
+                    obj.Name
+                )
+            )
+
+        if measured < obj.LowerLimit or measured > obj.UpperLimit:
+            errors.append(
+                "{} measured value {:.6f} is outside limits {:.6f} to {:.6f}.".format(
+                    obj.Name,
+                    measured,
+                    obj.LowerLimit,
+                    obj.UpperLimit
+                )
+            )
 
     return errors
 
@@ -344,6 +429,24 @@ def semantic_pmi_objects(doc):
 
 
 def attachment_text(obj):
+    if is_mbd_dimension(obj):
+        ref1 = "<none>"
+        ref2 = "<none>"
+
+        if obj.ReferenceObject1:
+            ref1 = obj.ReferenceObject1.Name
+
+            if obj.ReferenceSubelement1:
+                ref1 += "." + obj.ReferenceSubelement1
+
+        if obj.ReferenceObject2:
+            ref2 = obj.ReferenceObject2.Name
+
+            if obj.ReferenceSubelement2:
+                ref2 += "." + obj.ReferenceSubelement2
+
+        return "{} to {}".format(ref1, ref2)
+
     if is_mbd_basic_dimension(obj):
         ref1 = "<none>"
         ref2 = "<none>"
@@ -407,6 +510,9 @@ def attachment_text(obj):
 
 
 def pmi_type(obj):
+    if is_mbd_dimension(obj):
+        return "Dimension"
+
     if is_mbd_basic_dimension(obj):
         return "Basic Dimension"
 
@@ -546,6 +652,7 @@ def validate_document_structured(doc):
     datum_objects = [obj for obj in doc.Objects if is_mbd_datum(obj)]
     datum_targets = [obj for obj in doc.Objects if is_mbd_datum_target(obj)]
     basic_dimensions = [obj for obj in doc.Objects if is_mbd_basic_dimension(obj)]
+    dimensions = [obj for obj in doc.Objects if is_mbd_dimension(obj)]
     datum_systems = [obj for obj in doc.Objects if is_mbd_datum_system(obj)]
     fcf_objects = [obj for obj in doc.Objects if is_mbd_fcf(obj)]
 
@@ -568,6 +675,10 @@ def validate_document_structured(doc):
         for error in validate_basic_dimension(obj):
             issues.append(ValidationIssue("error", obj, error))
 
+    for obj in dimensions:
+        for error in validate_dimension(obj):
+            issues.append(ValidationIssue("error", obj, error))
+
     for obj in datum_systems:
         for error in validate_datum_system(obj):
             issues.append(ValidationIssue("error", obj, error))
@@ -583,6 +694,7 @@ def validate_document_structured(doc):
         "datums": datum_objects,
         "datum_targets": datum_targets,
         "basic_dimensions": basic_dimensions,
+        "dimensions": dimensions,
         "datum_systems": datum_systems,
         "fcfs": fcf_objects,
         "issues": issues,

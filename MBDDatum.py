@@ -61,6 +61,13 @@ class MBDDatumFeature:
             "Marks this object as semantic PMI"
         )
         obj.IsSemanticPMI = True
+
+        obj.addProperty(
+            "App::PropertyLink",
+            "DisplayText",
+            "MBD",
+            "Optional visible datum label text helper"
+        )
         
         obj.addProperty(
             "App::PropertyVector",

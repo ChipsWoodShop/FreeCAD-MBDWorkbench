@@ -18,6 +18,14 @@ from MBDBasicDimension import (
     measured_dimension_value,
     update_basic_dimension_signature
 )
+from MBDDimension import (
+    MBDDimension,
+    ViewProviderMBDDimension,
+    DIMENSION_PURPOSES,
+    dimension_display_label,
+    measurement_from_references,
+    update_dimension_signature
+)
 from MBDDatum import MBDDatumFeature, ViewProviderMBDDatumFeature
 import MBDValidation
 from MBDDatum import (
@@ -50,6 +58,7 @@ VALID_DATUM_LETTERS = [
 MAX_DISPLAY_OFFSET = 1000.0
 TEXT_HEIGHT_FACTOR = 0.12
 TEXT_STAGGER_FACTOR = 1.35
+PMI_TEXT_HEIGHT_FACTOR = 0.06
 
 
 def finite_number(value):
@@ -166,6 +175,47 @@ def selection_subelement(selection):
     return ""
 
 
+def expanded_selection_references(selection):
+    references = []
+
+    for item in selection:
+        subelements = list(getattr(item, "SubElementNames", []))
+
+        if not subelements:
+            references.append((item, ""))
+            continue
+
+        for subelement in subelements:
+            references.append((item, subelement))
+
+    return references
+
+
+def semantic_reference_for_subelement(doc, selection, subelement):
+    obj = selection.Object
+
+    if hasattr(obj, "DatumLabel"):
+        return obj, ""
+
+    if not subelement:
+        return obj, subelement
+
+    for candidate in doc.Objects:
+        if not hasattr(candidate, "DatumLabel"):
+            continue
+
+        try:
+            if (
+                candidate.ReferencedObject == obj
+                and candidate.ReferencedSubelement == subelement
+            ):
+                return candidate, ""
+        except Exception:
+            pass
+
+    return obj, subelement
+
+
 def semantic_datum_for_selection(doc, selection):
     obj = selection.Object
     subelement = selection_subelement(selection)
@@ -193,14 +243,39 @@ def semantic_datum_for_selection(doc, selection):
 
 
 def document_shape_center_and_size(doc):
-    bbox = None
+    bbox = document_shape_bound_box(doc)
 
+    if bbox is None:
+        return None, 10.0
+
+    center = FreeCAD.Vector(
+        (bbox.XMin + bbox.XMax) * 0.5,
+        (bbox.YMin + bbox.YMax) * 0.5,
+        (bbox.ZMin + bbox.ZMax) * 0.5
+    )
+    size = max(bbox.XLength, bbox.YLength, bbox.ZLength, 10.0)
+    size = min(size, MAX_DISPLAY_OFFSET)
+
+    return center, size
+
+
+def document_shape_bound_box(doc):
+    bbox = None
     for obj in doc.Objects:
         try:
+            if getattr(obj, "IsSemanticPMI", False):
+                continue
+
             if (
                 obj.Name.startswith("MBD_BasicDimension_Display")
+                or obj.Name.startswith("MBD_Dimension")
                 or "_Display" in obj.Name
+                or "_TextBox" in obj.Name
+                or "_Text" in obj.Name
+                or obj.Label.startswith("MBD_Dimension")
                 or obj.Label.endswith("_Display")
+                or obj.Label.endswith("_TextBox")
+                or obj.Label.endswith("_Text")
             ):
                 continue
 
@@ -219,18 +294,25 @@ def document_shape_center_and_size(doc):
         except Exception:
             pass
 
-    if bbox is None:
-        return None, 10.0
+    return bbox
 
-    center = FreeCAD.Vector(
-        (bbox.XMin + bbox.XMax) * 0.5,
-        (bbox.YMin + bbox.YMax) * 0.5,
-        (bbox.ZMin + bbox.ZMax) * 0.5
-    )
-    size = max(bbox.XLength, bbox.YLength, bbox.ZLength, 10.0)
-    size = min(size, MAX_DISPLAY_OFFSET)
 
-    return center, size
+def bound_box_corners(bbox):
+    return [
+        FreeCAD.Vector(x, y, z)
+        for x in [bbox.XMin, bbox.XMax]
+        for y in [bbox.YMin, bbox.YMax]
+        for z in [bbox.ZMin, bbox.ZMax]
+    ]
+
+
+def max_projection(points, direction):
+    return max(point.dot(direction) for point in points)
+
+
+def pmi_text_height(doc):
+    _, doc_size = document_shape_center_and_size(doc)
+    return max(doc_size * PMI_TEXT_HEIGHT_FACTOR, 3.0)
 
 
 def display_offset_for_dimension(doc, p1, p2):
@@ -292,7 +374,9 @@ def make_basic_dimension_display(
     label,
     preferred_offset=None,
     text_normal=None,
-    owner_name="MBD_BasicDimension"
+    owner_name="MBD_BasicDimension",
+    text_height=None,
+    boxed_text=True
 ):
     try:
         midpoint = p1 + ((p2 - p1) * 0.5)
@@ -307,16 +391,19 @@ def make_basic_dimension_display(
         if measured_direction.Length == 0:
             return None
 
+        if text_height is None:
+            text_height = pmi_text_height(doc)
+
         p1_display = p1 + offset
         p2_display = p2 + offset
-        text_lift = FreeCAD.Vector(0, 0, max(offset.Length * 0.08, 2.0))
+        text_lift = FreeCAD.Vector(0, 0, max(text_height * 0.5, 2.0))
 
         if text_normal is not None and finite_vector(text_normal):
             text_lift = FreeCAD.Vector(text_normal)
 
             if text_lift.Length > 0:
                 text_lift.normalize()
-                text_lift.multiply(max(offset.Length * 0.08, 2.0))
+                text_lift.multiply(max(text_height * 0.5, 2.0))
 
         text_point = midpoint + offset + text_lift
 
@@ -352,10 +439,21 @@ def make_basic_dimension_display(
         text_obj = make_basic_dimension_text(
             text_point,
             label,
-            max(offset.Length * 0.12, 3.0),
+            text_height,
             text_rotation_for_display_line(p1_display, p2_display, text_normal),
             owner_name + "_Text"
         )
+        text_box = None
+
+        if boxed_text:
+            text_box = make_basic_dimension_text_box(
+                doc,
+                text_point,
+                label,
+                text_height,
+                text_rotation_for_display_line(p1_display, p2_display, text_normal),
+                owner_name + "_TextBox"
+            )
         doc.recompute()
         FreeCAD.Console.PrintMessage(
             "Created basic dimension display {}: "
@@ -366,10 +464,136 @@ def make_basic_dimension_display(
                 p2_display.x, p2_display.y, p2_display.z
             )
         )
-        return dim, text_obj
+        return dim, text_obj, text_box
     except Exception as e:
         FreeCAD.Console.PrintWarning(
             "Could not create basic dimension display: {}\n".format(e)
+        )
+        return None
+
+
+def outward_normal_from_shape(doc, shape):
+    if shape is None:
+        return None
+
+    try:
+        u_min, u_max, v_min, v_max = shape.ParameterRange
+        normal = shape.normalAt(
+            (u_min + u_max) * 0.5,
+            (v_min + v_max) * 0.5
+        )
+    except Exception:
+        try:
+            normal = FreeCAD.Vector(shape.Surface.Axis)
+        except Exception:
+            return None
+
+    if normal.Length == 0:
+        return None
+
+    normal.normalize()
+    doc_center, _ = document_shape_center_and_size(doc)
+
+    try:
+        shape_point = shape.CenterOfMass
+    except Exception:
+        shape_point = FreeCAD.Vector(0, 0, 0)
+
+    if doc_center is not None and finite_vector(doc_center):
+        if (shape_point - doc_center).dot(normal) < 0:
+            normal = normal.negative()
+
+    return normal
+
+
+def reference_shape(obj, subelement=""):
+    if obj is None:
+        return None
+
+    if subelement:
+        try:
+            return obj.Shape.getElement(subelement)
+        except Exception:
+            return None
+
+    try:
+        return obj.Shape
+    except Exception:
+        return None
+
+
+def display_context_for_dimension(doc, ref_obj_1, ref_sub_1, ref_obj_2, ref_sub_2, p1, p2):
+    shape = reference_shape(ref_obj_1, ref_sub_1)
+    normal = outward_normal_from_shape(doc, shape)
+
+    if normal is None:
+        shape = reference_shape(ref_obj_2, ref_sub_2)
+        normal = outward_normal_from_shape(doc, shape)
+
+    text_normal = normal
+    preferred_offset = None
+
+    if normal is not None:
+        leader = leader_direction_for_points(doc, p1, p2, normal)
+
+        if leader is not None:
+            measured_direction = p2 - p1
+
+            if measured_direction.Length > 0:
+                annotation_normal = measured_direction.cross(leader)
+
+                if annotation_normal.Length > 0:
+                    annotation_normal.normalize()
+                    text_normal = annotation_normal
+
+            current_extent = model_extent_along(doc, leader)
+            preferred_offset, _new_extent = offset_beyond_current_extent(
+                doc,
+                p1,
+                p2,
+                leader,
+                current_extent,
+                pmi_text_height(doc)
+            )
+
+    return preferred_offset, text_normal
+
+
+def make_basic_dimension_text_box(doc, point, text, height, rotation=None, object_name="MBD_BasicDimension_TextBox"):
+    try:
+        width = max(len(text) * height * 0.62, height * 2.0)
+        padding = height * 0.35
+        local_points = [
+            FreeCAD.Vector(-padding, -padding, 0),
+            FreeCAD.Vector(width + padding, -padding, 0),
+            FreeCAD.Vector(width + padding, height + padding, 0),
+            FreeCAD.Vector(-padding, height + padding, 0),
+            FreeCAD.Vector(-padding, -padding, 0),
+        ]
+
+        placement = FreeCAD.Placement(point, rotation or FreeCAD.Rotation())
+        points = [placement.multVec(local_point) for local_point in local_points]
+        box_obj = doc.addObject("Part::Feature", object_name)
+        box_obj.Shape = Part.makePolygon(points)
+        box_obj.Label = box_obj.Name
+
+        view_obj = getattr(box_obj, "ViewObject", None)
+
+        if view_obj is not None:
+            for prop, value in [
+                ("LineColor", (1.0, 1.0, 1.0)),
+                ("LineWidth", 1.0),
+            ]:
+                if hasattr(view_obj, prop):
+                    try:
+                        setattr(view_obj, prop, value)
+                    except Exception:
+                        pass
+
+        return box_obj
+    except Exception as e:
+        FreeCAD.Console.PrintWarning(
+            "Could not create basic dimension text box: {}\n".format(e)
         )
         return None
 
@@ -423,6 +647,104 @@ def make_basic_dimension_text(point, text, height, rotation=None, object_name="M
             "Could not create basic dimension text: {}\n".format(e)
         )
         return None
+
+
+def referenced_subelement_center(obj, subelement):
+    if obj is None or not subelement:
+        return None
+
+    try:
+        target = obj.Shape.getElement(subelement)
+
+        if hasattr(target, "CenterOfMass"):
+            return target.CenterOfMass
+
+        if hasattr(target, "Point"):
+            return target.Point
+    except Exception:
+        pass
+
+    return None
+
+
+def make_pmi_label_text(doc, point, text, owner_name, normal=None, height=None):
+    if point is None:
+        return None
+
+    _, doc_size = document_shape_center_and_size(doc)
+
+    if height is None:
+        height = pmi_text_height(doc)
+
+    offset = FreeCAD.Vector(0, 0, height * 1.5)
+
+    if normal is not None and finite_vector(normal):
+        offset = FreeCAD.Vector(normal)
+
+        if offset.Length > 0:
+            offset.normalize()
+            offset.multiply(height * 1.5)
+
+    label_point = point + offset
+    rotation = None
+
+    if normal is not None:
+        rotation = text_rotation_for_display_line(
+            label_point,
+            label_point + FreeCAD.Vector(1, 0, 0),
+            normal
+        )
+
+    return make_basic_dimension_text(
+        label_point,
+        text,
+        height,
+        rotation,
+        owner_name + "_Text"
+    )
+
+
+def create_datum_display_text(doc, datum_obj):
+    normal = datum_outward_normal(doc, datum_obj)
+    point = referenced_subelement_center(
+        datum_obj.ReferencedObject,
+        datum_obj.ReferencedSubelement
+    )
+
+    text_obj = make_pmi_label_text(
+        doc,
+        point,
+        datum_obj.DatumLabel,
+        datum_obj.Name,
+        normal
+    )
+
+    if text_obj is not None:
+        datum_obj.DisplayText = text_obj
+
+    return text_obj
+
+
+def create_datum_target_display_text(doc, target_obj):
+    normal = None
+
+    if target_obj.ParentDatum is not None:
+        normal = datum_outward_normal(doc, target_obj.ParentDatum)
+
+    point = target_obj.TargetPoint
+
+    text_obj = make_pmi_label_text(
+        doc,
+        point,
+        target_obj.TargetId,
+        target_obj.Name,
+        normal
+    )
+
+    if text_obj is not None:
+        target_obj.DisplayText = text_obj
+
+    return text_obj
 
 
 def datum_outward_normal(doc, datum_obj):
@@ -486,10 +808,16 @@ def text_rotation_for_display_line(p1_display, p2_display, outward_normal):
 
     x_axis.normalize()
 
-    if abs(x_axis.x) >= abs(x_axis.y):
-        if x_axis.x < 0:
-            x_axis = x_axis.negative()
-    elif x_axis.y < 0:
+    dominant_axis = max(
+        [
+            (abs(x_axis.x), x_axis.x),
+            (abs(x_axis.y), x_axis.y),
+            (abs(x_axis.z), x_axis.z),
+        ],
+        key=lambda item: item[0]
+    )
+
+    if dominant_axis[1] < 0:
         x_axis = x_axis.negative()
 
     y_axis = normal.cross(x_axis)
@@ -559,32 +887,154 @@ def datum_plane_display_offset(doc, datum_obj, p1, p2, stack_index=0):
         return None
 
     midpoint = p1 + ((p2 - p1) * 0.5)
+    measured_direction = p2 - p1
     offset = FreeCAD.Vector(0, 0, 0)
 
-    if doc_center is not None and finite_vector(doc_center):
-        offset = midpoint - doc_center
-        offset = offset - normal * offset.dot(normal)
+    if measured_direction.Length > 0:
+        measured_direction = measured_direction - normal * measured_direction.dot(normal)
+
+    if measured_direction.Length > 0:
+        offset = measured_direction.cross(normal)
 
     if offset.Length == 0:
-        measured_direction = p2 - p1
-        offset = normal.cross(measured_direction)
+        if doc_center is not None and finite_vector(doc_center):
+            offset = midpoint - doc_center
+            offset = offset - normal * offset.dot(normal)
 
     if offset.Length == 0:
         offset = normal.cross(FreeCAD.Vector(0, 0, 1))
 
-        if offset.Length == 0:
-            offset = normal.cross(FreeCAD.Vector(0, 1, 0))
+    if offset.Length == 0:
+        offset = normal.cross(FreeCAD.Vector(0, 1, 0))
 
     if offset.Length == 0:
         return None
 
     offset.normalize()
+
+    if doc_center is not None and finite_vector(doc_center):
+        center_vector = midpoint - doc_center
+        center_vector = center_vector - normal * center_vector.dot(normal)
+
+        if center_vector.Length > 0 and center_vector.dot(offset) < 0:
+            offset = offset.negative()
+
     offset.multiply(offset_length + (stack_spacing * stack_index))
 
     return offset
 
 
-def staggered_offset_from_base(base_offset, stack_index):
+def leader_direction_for_dimension(doc, datum_obj, p1, p2):
+    normal = datum_outward_normal(doc, datum_obj)
+    doc_center, _ = document_shape_center_and_size(doc)
+
+    if normal is None:
+        return None
+
+    return leader_direction_for_points(doc, p1, p2, normal)
+
+
+def leader_direction_for_points(doc, p1, p2, normal):
+    doc_center, _ = document_shape_center_and_size(doc)
+
+    if normal is None:
+        return None
+
+    measured_direction = p2 - p1
+
+    if measured_direction.Length > 0:
+        measured_direction = measured_direction - normal * measured_direction.dot(normal)
+
+    leader = FreeCAD.Vector(0, 0, 0)
+
+    if measured_direction.Length > 0:
+        leader = measured_direction.cross(normal)
+
+    midpoint = p1 + ((p2 - p1) * 0.5)
+
+    if leader.Length == 0 and doc_center is not None and finite_vector(doc_center):
+        leader = midpoint - doc_center
+        leader = leader - normal * leader.dot(normal)
+
+    if leader.Length == 0:
+        leader = normal.cross(FreeCAD.Vector(0, 0, 1))
+
+    if leader.Length == 0:
+        leader = normal.cross(FreeCAD.Vector(0, 1, 0))
+
+    if leader.Length == 0:
+        return None
+
+    leader.normalize()
+
+    if doc_center is not None and finite_vector(doc_center):
+        center_vector = midpoint - doc_center
+        center_vector = center_vector - normal * center_vector.dot(normal)
+
+        if center_vector.Length > 0 and center_vector.dot(leader) < 0:
+            leader = leader.negative()
+
+    return leader
+
+
+def leader_direction_key(leader):
+    if leader is None or not finite_vector(leader):
+        return "Unknown"
+
+    return (
+        round(leader.x, 3),
+        round(leader.y, 3),
+        round(leader.z, 3),
+    )
+
+
+def model_extent_along(doc, leader):
+    bbox = document_shape_bound_box(doc)
+
+    if bbox is None:
+        return 0.0
+
+    return max_projection(bound_box_corners(bbox), leader)
+
+
+def offset_beyond_current_extent(doc, p1, p2, leader, current_extent, text_height):
+    current_dimension_extent = max_projection([p1, p2], leader)
+    desired_extent = current_extent + (text_height * 2.0)
+    offset_distance = desired_extent - current_dimension_extent
+
+    if offset_distance < text_height * 2.0:
+        offset_distance = text_height * 2.0
+        desired_extent = current_dimension_extent + offset_distance
+
+    return leader * offset_distance, desired_extent
+
+
+def dimension_direction_key(doc, datum_obj, p1, p2):
+    normal = datum_outward_normal(doc, datum_obj)
+    direction = p2 - p1
+
+    if direction.Length == 0:
+        return "Unknown"
+
+    if normal is not None and finite_vector(normal) and normal.Length > 0:
+        normal = FreeCAD.Vector(normal)
+        normal.normalize()
+        direction = direction - normal * direction.dot(normal)
+
+    if direction.Length == 0:
+        direction = p2 - p1
+
+    components = [
+        ("X", abs(direction.x)),
+        ("Y", abs(direction.y)),
+        ("Z", abs(direction.z)),
+    ]
+    components.sort(key=lambda item: item[1], reverse=True)
+
+    return components[0][0]
+
+
+def staggered_offset_from_base(base_offset, stack_index, text_height=None):
     if base_offset is None or not finite_vector(base_offset):
         return None
 
@@ -593,7 +1043,9 @@ def staggered_offset_from_base(base_offset, stack_index):
     if offset.Length == 0:
         return None
 
-    text_height = max(offset.Length * TEXT_HEIGHT_FACTOR, 3.0)
+    if text_height is None:
+        text_height = max(offset.Length * TEXT_HEIGHT_FACTOR, 3.0)
+
     stagger = text_height * TEXT_STAGGER_FACTOR * stack_index
     direction = FreeCAD.Vector(offset)
     direction.normalize()
@@ -644,6 +1096,146 @@ def next_basic_dimension_name(doc):
         index += 1
 
 
+def next_dimension_name(doc):
+    index = 1
+
+    while True:
+        name = "MBD_Dimension{:03d}".format(index)
+
+        if not object_name_exists(doc, name):
+            return name
+
+        index += 1
+
+
+def create_dimension_object(
+    doc,
+    ref_obj_1,
+    ref_sub_1,
+    ref_obj_2=None,
+    ref_sub_2="",
+    nominal=None,
+    dimension_purpose="PlusMinus",
+    dimension_kind="Linear",
+    measurement_type="Distance",
+    upper_tolerance=0.0,
+    lower_tolerance=0.0,
+    upper_limit=0.0,
+    lower_limit=0.0,
+    preferred_offset=None,
+    text_normal=None,
+    text_height=None
+):
+    measurement = measurement_from_references(
+        dimension_kind,
+        measurement_type,
+        ref_obj_1,
+        ref_sub_1,
+        ref_obj_2,
+        ref_sub_2
+    )
+    measured = measurement.get("value")
+
+    if measured is None:
+        return None
+
+    if nominal is None:
+        nominal = measured
+
+    dimension_name = next_dimension_name(doc)
+    dim_obj = doc.addObject(
+        "App::DocumentObjectGroupPython",
+        dimension_name
+    )
+
+    MBDDimension(dim_obj)
+    dim_obj.Label = dim_obj.Name
+    dim_obj.DimensionPurpose = str(dimension_purpose)
+    dim_obj.DimensionKind = str(dimension_kind)
+    dim_obj.MeasurementType = str(measurement_type)
+    dim_obj.NominalValue = nominal
+    dim_obj.MeasuredValue = measured
+    dim_obj.UpperTolerance = upper_tolerance
+    dim_obj.LowerTolerance = lower_tolerance
+    dim_obj.UpperLimit = upper_limit
+    dim_obj.LowerLimit = lower_limit
+    dim_obj.ReferenceObject1 = ref_obj_1
+    dim_obj.ReferenceSubelement1 = ref_sub_1
+    dim_obj.ReferenceObject2 = ref_obj_2
+    dim_obj.ReferenceSubelement2 = ref_sub_2
+    dim_obj.ReferencePattern = measurement.get("pattern", "")
+    dim_obj.ValidationMessage = measurement.get("message", "")
+
+    if str(dimension_kind) in ("Diameter", "Radius"):
+        dim_obj.AP242Entity = "DIMENSIONAL_SIZE"
+    elif str(dimension_purpose) == "Basic":
+        dim_obj.AP242Entity = "DIMENSIONAL_LOCATION"
+    elif str(measurement_type) == "Distance":
+        dim_obj.AP242Entity = "DIMENSIONAL_LOCATION"
+    else:
+        dim_obj.AP242Entity = "DIMENSIONAL_LOCATION"
+
+    update_dimension_signature(dim_obj)
+    append_pmi_history(dim_obj, "dimension-attached")
+
+    if FreeCAD.GuiUp:
+        if not hasattr(dim_obj, "addObject"):
+            ViewProviderMBDDimension(dim_obj.ViewObject)
+
+        p1 = measurement.get("point1")
+        p2 = measurement.get("point2")
+
+        if p1 is not None and p2 is not None:
+            if preferred_offset is None and text_normal is None:
+                preferred_offset, text_normal = display_context_for_dimension(
+                    doc,
+                    ref_obj_1,
+                    ref_sub_1,
+                    ref_obj_2,
+                    ref_sub_2,
+                    p1,
+                    p2
+                )
+
+            if text_height is None:
+                text_height = pmi_text_height(doc)
+
+            display_objects = make_basic_dimension_display(
+                doc,
+                p1,
+                p2,
+                dimension_display_label(dim_obj),
+                preferred_offset,
+                text_normal,
+                dim_obj.Name,
+                text_height,
+                str(dimension_purpose) == "Basic"
+            )
+
+            if display_objects is not None:
+                display_geometry, display_text, display_text_box = display_objects
+                dim_obj.DisplayDimension = display_geometry
+                dim_obj.DisplayText = display_text
+                dim_obj.DisplayTextBox = display_text_box
+
+                try:
+                    if display_geometry is not None:
+                        dim_obj.addObject(display_geometry)
+                        display_geometry.Label = display_geometry.Name
+
+                    if display_text is not None:
+                        dim_obj.addObject(display_text)
+                        display_text.Label = dim_obj.Name + "_Text"
+
+                    if display_text_box is not None:
+                        dim_obj.addObject(display_text_box)
+                        display_text_box.Label = display_text_box.Name
+                except Exception:
+                    pass
+
+    return dim_obj
+
+
 def create_basic_dimension_object(
     doc,
     ref_obj_1,
@@ -653,6 +1245,7 @@ def create_basic_dimension_object(
     nominal=None,
     preferred_offset=None,
     text_normal=None,
+    text_height=None,
     dimension_type="Distance"
 ):
     measured = measured_value_from_references(
@@ -686,7 +1279,7 @@ def create_basic_dimension_object(
     update_basic_dimension_signature(dim_obj)
     append_pmi_history(dim_obj, "basic-dimension-attached")
 
-    display_label = "[{}]".format(
+    display_label = "{}".format(
         FreeCAD.Units.Quantity(
             nominal,
             FreeCAD.Units.Length
@@ -720,13 +1313,15 @@ def create_basic_dimension_object(
                 display_label,
                 preferred_offset,
                 text_normal,
-                dim_obj.Name
+                dim_obj.Name,
+                text_height
             )
 
             if display_objects is not None:
-                display_geometry, display_text = display_objects
+                display_geometry, display_text, display_text_box = display_objects
                 dim_obj.DisplayDimension = display_geometry
                 dim_obj.DisplayText = display_text
+                dim_obj.DisplayTextBox = display_text_box
 
                 try:
                     if display_geometry is not None:
@@ -736,6 +1331,109 @@ def create_basic_dimension_object(
                     if display_text is not None:
                         dim_obj.addObject(display_text)
                         display_text.Label = dim_obj.Name + "_Text"
+
+                    if display_text_box is not None:
+                        dim_obj.addObject(display_text_box)
+                        display_text_box.Label = display_text_box.Name
+                except Exception:
+                    pass
+
+                dim_obj.Label = dim_obj.Name
+
+    return dim_obj
+
+
+def create_basic_dimension_from_measurement(
+    doc,
+    ref_obj_1,
+    ref_sub_1,
+    ref_obj_2,
+    ref_sub_2,
+    measurement,
+    nominal=None,
+    preferred_offset=None,
+    text_normal=None,
+    text_height=None,
+    dimension_type="Distance"
+):
+    measured = measurement.get("value")
+
+    if measured is None:
+        return None
+
+    if nominal is None:
+        nominal = measured
+
+    dimension_name = next_basic_dimension_name(doc)
+    dim_obj = doc.addObject(
+        "App::DocumentObjectGroupPython",
+        dimension_name
+    )
+
+    MBDBasicDimension(dim_obj)
+    dim_obj.Label = dim_obj.Name
+    dim_obj.DimensionType = str(dimension_type)
+    dim_obj.NominalValue = nominal
+    dim_obj.MeasuredValue = measured
+    dim_obj.ReferenceObject1 = ref_obj_1
+    dim_obj.ReferenceSubelement1 = ref_sub_1
+    dim_obj.ReferenceObject2 = ref_obj_2
+    dim_obj.ReferenceSubelement2 = ref_sub_2
+    update_basic_dimension_signature(dim_obj)
+    append_pmi_history(dim_obj, "basic-dimension-attached")
+
+    display_label = "{}".format(
+        FreeCAD.Units.Quantity(
+            nominal,
+            FreeCAD.Units.Length
+        ).UserString
+    )
+
+    if FreeCAD.GuiUp:
+        if not hasattr(dim_obj, "addObject"):
+            ViewProviderMBDBasicDimension(dim_obj.ViewObject)
+
+        p1 = measurement.get("point1")
+        p2 = measurement.get("point2")
+
+        if p1 is not None and p2 is not None:
+            FreeCAD.Console.PrintMessage(
+                "Basic dimension display endpoints: "
+                "({:.6f}, {:.6f}, {:.6f}) to "
+                "({:.6f}, {:.6f}, {:.6f})\n".format(
+                    p1.x, p1.y, p1.z,
+                    p2.x, p2.y, p2.z
+                )
+            )
+            display_objects = make_basic_dimension_display(
+                doc,
+                p1,
+                p2,
+                display_label,
+                preferred_offset,
+                text_normal,
+                dim_obj.Name,
+                text_height
+            )
+
+            if display_objects is not None:
+                display_geometry, display_text, display_text_box = display_objects
+                dim_obj.DisplayDimension = display_geometry
+                dim_obj.DisplayText = display_text
+                dim_obj.DisplayTextBox = display_text_box
+
+                try:
+                    if display_geometry is not None:
+                        dim_obj.addObject(display_geometry)
+                        display_geometry.Label = display_geometry.Name
+
+                    if display_text is not None:
+                        dim_obj.addObject(display_text)
+                        display_text.Label = dim_obj.Name + "_Text"
+
+                    if display_text_box is not None:
+                        dim_obj.addObject(display_text_box)
+                        display_text_box.Label = display_text_box.Name
                 except Exception:
                     pass
 
@@ -846,6 +1544,7 @@ class CreateDatumFeatureCommand:
 
         if FreeCAD.GuiUp:
             ViewProviderMBDDatumFeature(datum_obj.ViewObject)
+            create_datum_display_text(doc, datum_obj)
 
         doc.recompute()
 
@@ -988,6 +1687,7 @@ class CreateDatumTargetCommand:
 
         if FreeCAD.GuiUp:
             ViewProviderMBDDatumTarget(target_obj.ViewObject)
+            create_datum_target_display_text(doc, target_obj)
 
         doc.recompute()
 
@@ -1005,7 +1705,7 @@ class CreateBasicDimensionCommand:
     def GetResources(self):
         return {
             "MenuText": "Create Basic Dimension",
-            "ToolTip": "Create a semantic basic dimension between two point-like references",
+            "ToolTip": "Create a semantic basic dimension between two compatible references",
             "Pixmap": ""
         }
 
@@ -1015,19 +1715,28 @@ class CreateBasicDimensionCommand:
     def Activated(self):
         doc = FreeCAD.ActiveDocument
         selection = FreeCADGui.Selection.getSelectionEx()
+        references = expanded_selection_references(selection)
 
-        if len(selection) != 2:
+        if len(references) != 2:
             QtGui.QMessageBox.warning(
                 None,
                 "Basic Dimension",
-                "Select exactly two point-like references."
+                "Select exactly two compatible references."
             )
             return
 
-        ref1 = selection[0]
-        ref2 = selection[1]
-        ref_obj_1, sub1 = semantic_datum_for_selection(doc, ref1)
-        ref_obj_2, sub2 = semantic_datum_for_selection(doc, ref2)
+        ref1, subelement1 = references[0]
+        ref2, subelement2 = references[1]
+        ref_obj_1, sub1 = semantic_reference_for_subelement(
+            doc,
+            ref1,
+            subelement1
+        )
+        ref_obj_2, sub2 = semantic_reference_for_subelement(
+            doc,
+            ref2,
+            subelement2
+        )
 
         dim_type, ok = QtGui.QInputDialog.getItem(
             None,
@@ -1041,19 +1750,24 @@ class CreateBasicDimensionCommand:
         if not ok:
             return
 
-        measured = measured_value_from_references(
+        measurement = measurement_from_references(
+            "Linear",
             dim_type,
             ref_obj_1,
             sub1,
             ref_obj_2,
             sub2
         )
+        measured = measurement.get("value")
 
         if measured is None:
             QtGui.QMessageBox.warning(
                 None,
                 "Basic Dimension",
-                "References must be point-to-point or datum-to-point."
+                measurement.get(
+                    "message",
+                    "References must resolve to compatible dimension geometry."
+                )
             )
             return
 
@@ -1090,12 +1804,8 @@ class CreateBasicDimensionCommand:
         )
 
         if target_parent_datum is not None:
-            p1, p2 = display_points_from_references(
-                ref_obj_1,
-                sub1,
-                ref_obj_2,
-                sub2
-            )
+            p1 = measurement.get("point1")
+            p2 = measurement.get("point2")
 
             if p1 is not None and p2 is not None:
                 preferred_offset = datum_plane_display_offset(
@@ -1107,12 +1817,13 @@ class CreateBasicDimensionCommand:
                 )
                 text_normal = datum_outward_normal(doc, target_parent_datum)
 
-        dim_obj = create_basic_dimension_object(
+        dim_obj = create_basic_dimension_from_measurement(
             doc,
             ref_obj_1,
             sub1,
             ref_obj_2,
             sub2,
+            measurement,
             nominal,
             preferred_offset=preferred_offset,
             text_normal=text_normal,
@@ -1134,6 +1845,236 @@ class CreateBasicDimensionCommand:
                 dim_obj.Name,
                 ref_obj_1.Name,
                 ref_obj_2.Name
+            )
+        )
+
+
+class CreateDimensionCommand:
+
+    def GetResources(self):
+        return {
+            "MenuText": "Create Dimension",
+            "ToolTip": "Create a semantic AP242-ready dimension between two references",
+            "Pixmap": ""
+        }
+
+    def IsActive(self):
+        return FreeCAD.ActiveDocument is not None
+
+    def Activated(self):
+        doc = FreeCAD.ActiveDocument
+        selection = FreeCADGui.Selection.getSelectionEx()
+        references = expanded_selection_references(selection)
+
+        if len(references) not in (1, 2):
+            QtGui.QMessageBox.warning(
+                None,
+                "Dimension",
+                "Select one cylindrical face for diameter/radius, or two compatible references for a linear dimension."
+            )
+            return
+
+        ref1, subelement1 = references[0]
+        ref_obj_1, sub1 = semantic_reference_for_subelement(
+            doc,
+            ref1,
+            subelement1
+        )
+        ref_obj_2 = None
+        sub2 = ""
+
+        if len(references) == 2:
+            ref2, subelement2 = references[1]
+            ref_obj_2, sub2 = semantic_reference_for_subelement(
+                doc,
+                ref2,
+                subelement2
+            )
+
+        purpose, ok = QtGui.QInputDialog.getItem(
+            None,
+            "Dimension",
+            "Dimension purpose:",
+            DIMENSION_PURPOSES,
+            2,
+            False
+        )
+
+        if not ok:
+            return
+
+        dimension_kind = "Linear"
+
+        if len(references) == 1:
+            dimension_kind, ok = QtGui.QInputDialog.getItem(
+                None,
+                "Dimension",
+                "Dimension kind:",
+                ["Diameter", "Radius"],
+                0,
+                False
+            )
+
+            if not ok:
+                return
+
+        measurement_type = "Distance"
+
+        measurement = measurement_from_references(
+            dimension_kind,
+            measurement_type,
+            ref_obj_1,
+            sub1,
+            ref_obj_2,
+            sub2
+        )
+        measured = measurement.get("value")
+
+        if measured is None:
+            QtGui.QMessageBox.warning(
+                None,
+                "Dimension",
+                measurement.get(
+                    "message",
+                    "References must resolve to compatible dimension geometry."
+                )
+            )
+            return
+
+        measured_text = FreeCAD.Units.Quantity(
+            measured,
+            FreeCAD.Units.Length
+        ).UserString
+        nominal = measured
+
+        upper_tolerance = 0.0
+        lower_tolerance = 0.0
+        upper_limit = nominal
+        lower_limit = nominal
+
+        if purpose == "EqualBilateral":
+            tolerance_text, ok = QtGui.QInputDialog.getText(
+                None,
+                "Dimension",
+                "Bilateral tolerance:",
+                text=FreeCAD.Units.Quantity(0.0, FreeCAD.Units.Length).UserString
+            )
+
+            if not ok:
+                return
+
+            try:
+                upper_tolerance = abs(
+                    FreeCAD.Units.Quantity(str(tolerance_text)).Value
+                )
+                lower_tolerance = upper_tolerance
+            except Exception:
+                QtGui.QMessageBox.warning(
+                    None,
+                    "Dimension",
+                    "Enter a tolerance value such as 0.005 in or 0.1 mm."
+                )
+                return
+
+        if purpose == "PlusMinus":
+            upper_text, ok = QtGui.QInputDialog.getText(
+                None,
+                "Dimension",
+                "Upper tolerance:",
+                text=FreeCAD.Units.Quantity(0.0, FreeCAD.Units.Length).UserString
+            )
+
+            if not ok:
+                return
+
+            lower_text, ok = QtGui.QInputDialog.getText(
+                None,
+                "Dimension",
+                "Lower tolerance:",
+                text=FreeCAD.Units.Quantity(0.0, FreeCAD.Units.Length).UserString
+            )
+
+            if not ok:
+                return
+
+            try:
+                upper_tolerance = abs(
+                    FreeCAD.Units.Quantity(str(upper_text)).Value
+                )
+                lower_tolerance = abs(
+                    FreeCAD.Units.Quantity(str(lower_text)).Value
+                )
+            except Exception:
+                QtGui.QMessageBox.warning(
+                    None,
+                    "Dimension",
+                    "Enter tolerance values such as 0.005 in or 0.1 mm."
+                )
+                return
+
+        if purpose == "Limits":
+            lower_text, ok = QtGui.QInputDialog.getText(
+                None,
+                "Dimension",
+                "Lower limit:",
+                text=measured_text
+            )
+
+            if not ok:
+                return
+
+            upper_text, ok = QtGui.QInputDialog.getText(
+                None,
+                "Dimension",
+                "Upper limit:",
+                text=measured_text
+            )
+
+            if not ok:
+                return
+
+            try:
+                lower_limit = FreeCAD.Units.Quantity(str(lower_text)).Value
+                upper_limit = FreeCAD.Units.Quantity(str(upper_text)).Value
+            except Exception:
+                QtGui.QMessageBox.warning(
+                    None,
+                    "Dimension",
+                    "Enter limit values such as 1.245 in or 31.6 mm."
+                )
+                return
+
+        dim_obj = create_dimension_object(
+            doc,
+            ref_obj_1,
+            sub1,
+            ref_obj_2,
+            sub2,
+            nominal=nominal,
+            dimension_purpose=str(purpose),
+            dimension_kind=str(dimension_kind),
+            measurement_type=str(measurement_type),
+            upper_tolerance=upper_tolerance,
+            lower_tolerance=lower_tolerance,
+            upper_limit=upper_limit,
+            lower_limit=lower_limit
+        )
+
+        if dim_obj is None:
+            QtGui.QMessageBox.warning(
+                None,
+                "Dimension",
+                "Could not create the dimension."
+            )
+            return
+
+        doc.recompute()
+
+        FreeCAD.Console.PrintMessage(
+            "Created dimension {} between {} and {}\n".format(
+                dim_obj.Name,
+                ref_obj_1.Name,
+                ref_obj_2.Name if ref_obj_2 else "<none>"
             )
         )
 
@@ -1184,14 +2125,17 @@ class CreateTargetBasicDimensionsCommand:
             if hasattr(obj, "DimensionType") and hasattr(obj, "ReferenceObject1"):
                 existing_keys.add(existing_basic_dimension_key(obj))
 
-        stack_counts = {}
-        stack_base_offsets = {}
+        layout_extents = {}
+        batch_text_height = pmi_text_height(doc)
         created = 0
         skipped = 0
         failed = 0
 
         for target_datum in datums:
-            targets = get_datum_target_objects(doc, target_datum)
+            targets = sorted(
+                get_datum_target_objects(doc, target_datum),
+                key=lambda target: target.TargetId
+            )
 
             for target in targets:
                 for reference_datum in datums:
@@ -1215,21 +2159,32 @@ class CreateTargetBasicDimensionsCommand:
                         failed += 1
                         continue
 
-                    stack_key = (target_datum.Name, reference_datum.Name)
-                    stack_index = stack_counts.get(stack_key, 0)
+                    leader = leader_direction_for_dimension(
+                        doc,
+                        target_datum,
+                        p1,
+                        p2
+                    )
 
-                    if stack_key not in stack_base_offsets:
-                        stack_base_offsets[stack_key] = datum_plane_display_offset(
-                            doc,
-                            target_datum,
-                            p1,
-                            p2,
-                            0
-                        )
+                    if leader is None:
+                        failed += 1
+                        continue
 
-                    preferred_offset = staggered_offset_from_base(
-                        stack_base_offsets[stack_key],
-                        stack_index
+                    stack_key = (
+                        target_datum.Name,
+                        leader_direction_key(leader)
+                    )
+                    current_extent = layout_extents.get(
+                        stack_key,
+                        model_extent_along(doc, leader)
+                    )
+                    preferred_offset, new_extent = offset_beyond_current_extent(
+                        doc,
+                        p1,
+                        p2,
+                        leader,
+                        current_extent,
+                        batch_text_height
                     )
                     text_normal = datum_outward_normal(doc, target_datum)
 
@@ -1240,7 +2195,8 @@ class CreateTargetBasicDimensionsCommand:
                         reference_datum,
                         "",
                         preferred_offset=preferred_offset,
-                        text_normal=text_normal
+                        text_normal=text_normal,
+                        text_height=batch_text_height
                     )
 
                     if dim_obj is None:
@@ -1248,7 +2204,7 @@ class CreateTargetBasicDimensionsCommand:
                         continue
 
                     existing_keys.add(key)
-                    stack_counts[stack_key] = stack_index + 1
+                    layout_extents[stack_key] = new_extent
                     created += 1
 
         doc.recompute()
@@ -1539,6 +2495,10 @@ if hasattr(FreeCADGui, "addCommand"):
     FreeCADGui.addCommand(
         "MBD_CreateBasicDimension",
         CreateBasicDimensionCommand()
+    )
+    FreeCADGui.addCommand(
+        "MBD_CreateDimension",
+        CreateDimensionCommand()
     )
     FreeCADGui.addCommand(
         "MBD_CreateTargetBasicDimensions",

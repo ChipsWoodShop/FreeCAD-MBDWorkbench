@@ -135,6 +135,14 @@ class MBDDatumTarget:
 
         add_property_if_missing(
             obj,
+            "App::PropertyLink",
+            "DisplayText",
+            "MBD_Target",
+            "Optional visible datum target label text helper"
+        )
+
+        add_property_if_missing(
+            obj,
             "App::PropertyString",
             "Standard",
             "MBD",

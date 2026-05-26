@@ -113,6 +113,7 @@ class MBDInspectorWidget(QtGui.QWidget):
         pmi_objects.extend(report["datums"])
         pmi_objects.extend(report["datum_targets"])
         pmi_objects.extend(report["basic_dimensions"])
+        pmi_objects.extend(report["dimensions"])
         pmi_objects.extend(report["datum_systems"])
         pmi_objects.extend(report["fcfs"])
 
@@ -128,10 +129,11 @@ class MBDInspectorWidget(QtGui.QWidget):
         ])
 
         self.summary_label.setText(
-            "Datums: {}   Targets: {}   Basics: {}   Datum systems: {}   FCFs: {}   Errors: {}   Warnings: {}".format(
+            "Datums: {}   Targets: {}   Basics: {}   Dimensions: {}   Datum systems: {}   FCFs: {}   Errors: {}   Warnings: {}".format(
                 len(report["datums"]),
                 len(report["datum_targets"]),
                 len(report["basic_dimensions"]),
+                len(report["dimensions"]),
                 len(report["datum_systems"]),
                 len(report["fcfs"]),
                 error_count,

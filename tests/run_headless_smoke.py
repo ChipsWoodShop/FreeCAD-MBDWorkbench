@@ -67,6 +67,9 @@ def main():
             "fcf-diameter",
             "stale-cancel",
             "basic-dimension-projection",
+            "semantic-dimension",
+            "dimension-reference-patterns",
+            "cylinder-axis-dimensions",
         ],
         default="datum-only"
     )
