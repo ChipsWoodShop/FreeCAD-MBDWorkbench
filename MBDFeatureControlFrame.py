@@ -19,7 +19,18 @@ class MBDFeatureControlFrame:
         )
 
         obj.ToleranceType = [
-            "Position"
+            "Position",
+            "Flatness",
+            "Parallelism",
+            "Perpendicularity",
+            "Angularity",
+            "Straightness",
+            "Circularity",
+            "Cylindricity",
+            "CircularRunout",
+            "TotalRunout",
+            "LineProfile",
+            "Profile"
         ]
 
         obj.addProperty(
@@ -41,10 +52,26 @@ class MBDFeatureControlFrame:
         obj.DiameterZone = True
 
         obj.addProperty(
+            "App::PropertyBool",
+            "ProfileAllOver",
+            "MBD_FCF",
+            "Profile tolerance applies all over the part"
+        )
+
+        obj.ProfileAllOver = False
+
+        obj.addProperty(
             "App::PropertyLink",
             "DatumSystem",
             "MBD_FCF",
             "Referenced datum system"
+        )
+
+        obj.addProperty(
+            "App::PropertyLink",
+            "DatumReference",
+            "MBD_FCF",
+            "Single referenced datum feature"
         )
 
         obj.addProperty(
@@ -140,6 +167,26 @@ class MBDFeatureControlFrame:
             "Whether current referenced geometry matches stored signature"
         )
         obj.GeometrySignatureValid = True
+        obj.addProperty(
+            "App::PropertyLink",
+            "DisplayFrame",
+            "MBD_FCF",
+            "Optional visible feature control frame helper"
+        )
+
+        obj.addProperty(
+            "App::PropertyLink",
+            "DisplayText",
+            "MBD_FCF",
+            "Optional visible feature control frame text helper"
+        )
+
+        obj.addProperty(
+            "App::PropertyLink",
+            "DisplayLeader",
+            "MBD_FCF",
+            "Optional visible feature control frame leader helper"
+        )
         ensure_pmi_identity(obj, "fcf-created")
     def execute(self, obj):
         pass

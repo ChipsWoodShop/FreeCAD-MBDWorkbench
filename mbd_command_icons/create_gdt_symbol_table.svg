@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect width="64" height="64" rx="10" fill="#fffaf2"/>
+  <rect x="12" y="10" width="40" height="44" fill="#fff" stroke="#1f2933" stroke-width="4"/>
+  <path d="M12 24 H52 M12 38 H52 M25 10 V54 M39 10 V54" stroke="#1f2933" stroke-width="3"/>
+  <circle cx="18.5" cy="17" r="4" fill="none" stroke="#f28c00" stroke-width="3"/>
+  <path d="M32 14 L36 20 H28 Z" fill="#5fa8e8" stroke="#0b4f8a" stroke-width="2"/>
+  <text x="45.5" y="21" text-anchor="middle" font-family="Arial, sans-serif" font-weight="700" font-size="10" fill="#1f2933">//</text>
+  <path d="M17 45 H21 M19 43 V47" stroke="#1f2933" stroke-width="2"/>
+  <text x="32" y="49" text-anchor="middle" font-family="Arial, sans-serif" font-weight="700" font-size="10" fill="#1f2933">⌀</text>
+  <text x="45.5" y="49" text-anchor="middle" font-family="Arial, sans-serif" font-weight="700" font-size="10" fill="#1f2933">⌖</text>
+</svg>

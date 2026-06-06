@@ -41,7 +41,18 @@ def tolerance_value(text):
     return float(match.group(1))
 
 
-def check_step_file(path, expected_tolerance):
+def check_step_file(
+    path,
+    expected_tolerance,
+    require_all_fcfs=False,
+    require_dimensions=False,
+    min_dimensional_size=1,
+    require_location_dimensions=False,
+    require_directed_location_dimensions=False,
+    require_datum_targets=False,
+    require_common_datum=False,
+    require_geometric_tolerances=True
+):
     text = path.read_text(errors="replace")
     entities = load_entities(text)
     failures = []
@@ -88,12 +99,85 @@ def check_step_file(path, expected_tolerance):
                 "datum GEOMETRIC_ITEM_SPECIFIC_USAGE does not target an ADVANCED_FACE",
                 failures)
 
-    require("POSITION_TOLERANCE" in text,
-            "missing POSITION_TOLERANCE",
-            failures)
-    require("GEOMETRIC_TOLERANCE_WITH_DATUM_REFERENCE" in text,
-            "missing GEOMETRIC_TOLERANCE_WITH_DATUM_REFERENCE",
-            failures)
+    if require_geometric_tolerances:
+        require("POSITION_TOLERANCE" in text,
+                "missing POSITION_TOLERANCE",
+                failures)
+        require("GEOMETRIC_TOLERANCE_WITH_DATUM_REFERENCE" in text,
+                "missing GEOMETRIC_TOLERANCE_WITH_DATUM_REFERENCE",
+                failures)
+
+    if require_all_fcfs:
+        for entity_name in [
+            "ANGULARITY_TOLERANCE",
+            "CIRCULAR_RUNOUT_TOLERANCE",
+            "CYLINDRICITY_TOLERANCE",
+            "FLATNESS_TOLERANCE",
+            "LINE_PROFILE_TOLERANCE",
+            "PARALLELISM_TOLERANCE",
+            "PERPENDICULARITY_TOLERANCE",
+            "ROUNDNESS_TOLERANCE",
+            "STRAIGHTNESS_TOLERANCE",
+            "SURFACE_PROFILE_TOLERANCE",
+            "TOTAL_RUNOUT_TOLERANCE",
+        ]:
+            require(entity_name in text,
+                    "missing {}".format(entity_name),
+                    failures)
+
+    if require_dimensions:
+        for entity_name in [
+            "DIMENSIONAL_SIZE",
+            "SHAPE_DIMENSION_REPRESENTATION",
+            "DIMENSIONAL_CHARACTERISTIC_REPRESENTATION",
+            "PLUS_MINUS_TOLERANCE",
+        ]:
+            require(entity_name in text,
+                    "missing {}".format(entity_name),
+                    failures)
+
+        dimensional_size_count = len([
+            body
+            for body in entities.values()
+            if body.startswith("DIMENSIONAL_SIZE")
+        ])
+        require(dimensional_size_count >= min_dimensional_size,
+                "expected at least {} DIMENSIONAL_SIZE entities, found {}".format(
+                    min_dimensional_size,
+                    dimensional_size_count
+                ),
+                failures)
+
+    if require_location_dimensions:
+        require("DIMENSIONAL_LOCATION" in text,
+                "missing DIMENSIONAL_LOCATION",
+                failures)
+
+    if require_directed_location_dimensions:
+        require("DIRECTED_DIMENSIONAL_LOCATION" in text,
+                "missing DIRECTED_DIMENSIONAL_LOCATION",
+                failures)
+
+    if require_datum_targets:
+        for entity_name in [
+            "PLACED_DATUM_TARGET_FEATURE",
+            "FEATURE_FOR_DATUM_TARGET_RELATIONSHIP",
+            "SHAPE_REPRESENTATION_WITH_PARAMETERS",
+        ]:
+            require(entity_name in text,
+                    "missing {}".format(entity_name),
+                    failures)
+
+    if require_common_datum:
+        for entity_name in [
+            "COMMON_DATUM_LIST",
+            "DATUM_REFERENCE_ELEMENT",
+            "DATUM_REFERENCE_COMPARTMENT",
+            "DATUM_SYSTEM",
+        ]:
+            require(entity_name in text,
+                    "missing {}".format(entity_name),
+                    failures)
 
     if "TOLERANCE_ZONE" in text:
         require("TOLERANCE_ZONE_FORM" in text,
@@ -101,7 +185,9 @@ def check_step_file(path, expected_tolerance):
                 failures)
 
     value = tolerance_value(text)
-    require(value is not None, "missing tolerance LENGTH_MEASURE value", failures)
+
+    if require_geometric_tolerances:
+        require(value is not None, "missing tolerance LENGTH_MEASURE value", failures)
 
     if value is not None:
         require(value > 0.0, "tolerance value is not positive", failures)
@@ -132,9 +218,53 @@ def main():
         type=float,
         default=None
     )
+    parser.add_argument(
+        "--require-all-fcfs",
+        action="store_true"
+    )
+    parser.add_argument(
+        "--require-dimensions",
+        action="store_true"
+    )
+    parser.add_argument(
+        "--min-dimensional-size",
+        type=int,
+        default=1
+    )
+    parser.add_argument(
+        "--require-location-dimensions",
+        action="store_true"
+    )
+    parser.add_argument(
+        "--require-directed-location-dimensions",
+        action="store_true"
+    )
+    parser.add_argument(
+        "--require-datum-targets",
+        action="store_true"
+    )
+    parser.add_argument(
+        "--require-common-datum",
+        action="store_true"
+    )
+    parser.add_argument(
+        "--no-geometric-tolerances",
+        action="store_true"
+    )
     args = parser.parse_args()
 
-    failures = check_step_file(args.step_file, args.expected_tolerance)
+    failures = check_step_file(
+        args.step_file,
+        args.expected_tolerance,
+        args.require_all_fcfs,
+        args.require_dimensions,
+        args.min_dimensional_size,
+        args.require_location_dimensions,
+        args.require_directed_location_dimensions,
+        args.require_datum_targets,
+        args.require_common_datum,
+        not args.no_geometric_tolerances
+    )
 
     if failures:
         for failure in failures:

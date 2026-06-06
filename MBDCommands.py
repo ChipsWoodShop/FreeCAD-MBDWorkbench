@@ -1,6 +1,7 @@
 # MBDCommands.py
 
 import math
+import os
 
 import FreeCAD
 import FreeCADGui
@@ -22,6 +23,7 @@ from MBDDimension import (
     MBDDimension,
     ViewProviderMBDDimension,
     DIMENSION_PURPOSES,
+    DIMENSION_PURPOSE_CHOICES,
     dimension_display_label,
     measurement_from_references,
     update_dimension_signature
@@ -34,15 +36,20 @@ from MBDDatum import (
     update_geometry_signature
 )
 import MBDInspector
-from MBDPMI import append_pmi_history
+from MBDPMI import append_pmi_history, update_pmi_display_layout
 from MBDDatumTarget import (
     MBDDatumTarget,
     ViewProviderMBDDatumTarget,
     update_datum_target_signature
 )
 from MBDDatumSystem import (
+    DATUM_COMPARTMENT_PROPERTIES,
     MBDDatumSystem,
-    ViewProviderMBDDatumSystem
+    ViewProviderMBDDatumSystem,
+    datum_compartment_label,
+    datum_system_compartments,
+    datum_system_label,
+    is_datum_system_object
 )
 from MBDFeatureControlFrame import (
     MBDFeatureControlFrame,
@@ -59,6 +66,38 @@ MAX_DISPLAY_OFFSET = 1000.0
 TEXT_HEIGHT_FACTOR = 0.12
 TEXT_STAGGER_FACTOR = 1.35
 PMI_TEXT_HEIGHT_FACTOR = 0.06
+EXTENSION_GAP_FACTOR = 0.7
+EXTENSION_OVERSHOOT_FACTOR = 0.8
+ARROW_LENGTH_FACTOR = 1.3
+ARROW_WIDTH_FACTOR = 0.45
+TEXT_WIDTH_FACTOR = 0.62
+TEXT_GAP_FACTOR = 0.35
+
+GEOMETRIC_TOLERANCE_SYMBOLS = [
+    ("Straightness", "⏤"),
+    ("Flatness", "⏥"),
+    ("Circularity", "○"),
+    ("Cylindricity", "⌭"),
+    ("Profile of a Line", "⌒"),
+    ("Profile of a Surface", "⌓"),
+    ("Angularity", "∠"),
+    ("Perpendicularity", "⟂"),
+    ("Parallelism", "∥"),
+    ("Position", "⌖"),
+    ("Concentricity", "◎"),
+    ("Symmetry", "⌯"),
+    ("Circular Runout", "↗"),
+    ("Total Runout", "⌰"),
+    ("Diameter", "⌀"),
+]
+
+
+def command_icon(filename):
+    return os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "mbd_command_icons",
+        filename
+    )
 
 
 def finite_number(value):
@@ -91,6 +130,57 @@ def sane_bound_box(bbox):
         return False
 
     return True
+
+
+def is_semantic_pmi_object(obj):
+    return getattr(obj, "IsSemanticPMI", False)
+
+
+def get_mbd_pmi_group(doc):
+    if doc is None:
+        return None
+
+    group = doc.getObject("MBD_PMI")
+
+    if group is None:
+        group = doc.addObject("App::DocumentObjectGroup", "MBD_PMI")
+        group.Label = "MBD PMI"
+
+    return group
+
+
+def add_to_mbd_pmi_group(doc, obj):
+    group = get_mbd_pmi_group(doc)
+
+    if group is None or obj is None or obj == group:
+        return None
+
+    try:
+        if obj not in group.Group:
+            group.addObject(obj)
+    except Exception:
+        pass
+
+    return group
+
+
+def organize_pmi_tree(doc):
+    group = get_mbd_pmi_group(doc)
+
+    if group is None:
+        return None
+
+    for obj in doc.Objects:
+        if obj == group:
+            continue
+
+        if not is_semantic_pmi_object(obj):
+            continue
+
+        add_to_mbd_pmi_group(doc, obj)
+
+    return group
+
 
 def get_existing_datum_labels(doc):
     labels = set()
@@ -128,10 +218,20 @@ def get_datum_system_objects(doc):
 
     for obj in doc.Objects:
 
-        if hasattr(obj, "PrimaryDatum"):
+        if is_datum_system_object(obj):
             systems.append(obj)
 
     return systems
+
+
+def get_datum_feature_objects(doc):
+    datums = []
+
+    for obj in doc.Objects:
+        if hasattr(obj, "DatumLabel") and getattr(obj, "IsSemanticPMI", False):
+            datums.append(obj)
+
+    return datums
 
 
 def get_datum_target_objects(doc, datum_obj=None):
@@ -173,6 +273,52 @@ def selection_subelement(selection):
         return selection.SubElementNames[0]
 
     return ""
+
+
+def object_has_solid_shape(obj):
+    try:
+        shape = obj.Shape
+        return len(shape.Solids) > 0 or shape.ShapeType == "Solid"
+    except Exception:
+        return False
+
+
+def body_level_fcf_candidate(obj):
+    if obj is None:
+        return False
+
+    if is_pmi_display_helper(obj):
+        return False
+
+    if not object_has_solid_shape(obj):
+        return False
+
+    type_id = getattr(obj, "TypeId", "")
+
+    if type_id == "PartDesign::Body":
+        return True
+
+    return hasattr(obj, "Shape")
+
+
+def single_body_level_fcf_candidate(doc):
+    candidates = [
+        obj for obj in doc.Objects
+        if body_level_fcf_candidate(obj)
+    ]
+
+    bodies = [
+        obj for obj in candidates
+        if getattr(obj, "TypeId", "") == "PartDesign::Body"
+    ]
+
+    if len(bodies) == 1:
+        return bodies[0]
+
+    if len(candidates) == 1:
+        return candidates[0]
+
+    return None
 
 
 def expanded_selection_references(selection):
@@ -259,24 +405,63 @@ def document_shape_center_and_size(doc):
     return center, size
 
 
+def is_pmi_display_helper(obj):
+    name = getattr(obj, "Name", "")
+    label = getattr(obj, "Label", "")
+    name_label = "{} {}".format(name, label)
+
+    if getattr(obj, "IsSemanticPMI", False):
+        return True
+
+    helper_patterns = [
+        "MBD_BasicDimension_Display",
+        "MBD_GDTSymbolTable",
+        "_Display",
+        "_TextBox",
+        "_Text",
+        "_Frame",
+        "_Leader",
+        "_Marker",
+        "_Symbol",
+        "_Separator",
+        "DiameterSymbol",
+        "PositionSymbol",
+        "FlatnessSymbol",
+    ]
+
+    for pattern in helper_patterns:
+        if pattern in name_label:
+            return True
+
+    try:
+        for parent in obj.InList:
+            try:
+                if not hasattr(parent, "Group") or obj not in parent.Group:
+                    continue
+            except Exception:
+                continue
+
+            if getattr(parent, "IsSemanticPMI", False):
+                return True
+
+            parent_name_label = "{} {}".format(
+                getattr(parent, "Name", ""),
+                getattr(parent, "Label", "")
+            )
+
+            if "MBD_GDTSymbolTable" in parent_name_label:
+                return True
+    except Exception:
+        pass
+
+    return False
+
+
 def document_shape_bound_box(doc):
     bbox = None
     for obj in doc.Objects:
         try:
-            if getattr(obj, "IsSemanticPMI", False):
-                continue
-
-            if (
-                obj.Name.startswith("MBD_BasicDimension_Display")
-                or obj.Name.startswith("MBD_Dimension")
-                or "_Display" in obj.Name
-                or "_TextBox" in obj.Name
-                or "_Text" in obj.Name
-                or obj.Label.startswith("MBD_Dimension")
-                or obj.Label.endswith("_Display")
-                or obj.Label.endswith("_TextBox")
-                or obj.Label.endswith("_Text")
-            ):
+            if is_pmi_display_helper(obj):
                 continue
 
             if not hasattr(obj, "Shape") or obj.Shape.isNull():
@@ -319,6 +504,66 @@ def display_offset_for_dimension(doc, p1, p2):
     return display_offset_for_dimension_with_preference(doc, p1, p2, None)
 
 
+def preferred_display_offset_beyond_model(doc, p1, p2, display_direction, text_height):
+    if display_direction is None or not finite_vector(display_direction):
+        return None
+
+    leader = FreeCAD.Vector(display_direction)
+
+    if leader.Length <= 1e-9:
+        return None
+
+    leader.normalize()
+    current_extent = model_extent_along(doc, leader)
+    offset, _new_extent = offset_beyond_current_extent(
+        doc,
+        p1,
+        p2,
+        leader,
+        current_extent,
+        text_height
+    )
+    return offset
+
+
+def exterior_direction_from_point(doc, point, direction):
+    if point is None or direction is None or not finite_vector(direction):
+        return None
+
+    candidate = FreeCAD.Vector(direction)
+
+    if candidate.Length <= 1e-9:
+        return None
+
+    candidate.normalize()
+    opposite = candidate.negative()
+
+    doc_center, _doc_size = document_shape_center_and_size(doc)
+
+    if doc_center is not None and finite_vector(doc_center):
+        outward = point - doc_center
+
+        if outward.Length > 1e-9:
+            if candidate.dot(outward) < 0:
+                return opposite
+
+            return candidate
+
+    bbox = document_shape_bound_box(doc)
+
+    if bbox is None:
+        return candidate
+
+    corners = bound_box_corners(bbox)
+    candidate_gap = max_projection(corners, candidate) - point.dot(candidate)
+    opposite_gap = max_projection(corners, opposite) - point.dot(opposite)
+
+    if opposite_gap < candidate_gap:
+        return opposite
+
+    return candidate
+
+
 def display_offset_for_dimension_with_preference(doc, p1, p2, preferred_offset):
     midpoint = p1 + ((p2 - p1) * 0.5)
     measured_direction = p2 - p1
@@ -353,13 +598,9 @@ def display_offset_for_dimension_with_preference(doc, p1, p2, preferred_offset):
     if offset.Length == 0:
         offset = FreeCAD.Vector(0, 0, offset_length)
     elif using_preferred_offset:
-        if offset.Length < offset_length:
+        if offset.Length > MAX_DISPLAY_OFFSET:
             offset.normalize()
-            offset.multiply(offset_length)
-
-        if offset.Length > MAX_DISPLAY_OFFSET * 0.25:
-            offset.normalize()
-            offset.multiply(MAX_DISPLAY_OFFSET * 0.25)
+            offset.multiply(MAX_DISPLAY_OFFSET)
     else:
         offset.normalize()
         offset.multiply(offset_length)
@@ -376,7 +617,8 @@ def make_basic_dimension_display(
     text_normal=None,
     owner_name="MBD_BasicDimension",
     text_height=None,
-    boxed_text=True
+    boxed_text=True,
+    prefix_symbol_name=None
 ):
     try:
         midpoint = p1 + ((p2 - p1) * 0.5)
@@ -396,16 +638,77 @@ def make_basic_dimension_display(
 
         p1_display = p1 + offset
         p2_display = p2 + offset
-        text_lift = FreeCAD.Vector(0, 0, max(text_height * 0.5, 2.0))
+        dim_direction = p2_display - p1_display
 
-        if text_normal is not None and finite_vector(text_normal):
-            text_lift = FreeCAD.Vector(text_normal)
+        if dim_direction.Length == 0:
+            return None
 
-            if text_lift.Length > 0:
-                text_lift.normalize()
-                text_lift.multiply(max(text_height * 0.5, 2.0))
+        dim_direction.normalize()
+        extension_direction = FreeCAD.Vector(offset)
 
-        text_point = midpoint + offset + text_lift
+        if extension_direction.Length == 0:
+            return None
+
+        extension_direction.normalize()
+        extension_gap = text_height * EXTENSION_GAP_FACTOR
+        extension_overshoot = text_height * EXTENSION_OVERSHOOT_FACTOR
+        arrow_length = text_height * ARROW_LENGTH_FACTOR
+        arrow_width = text_height * ARROW_WIDTH_FACTOR
+        prefix_width = text_height * 1.15 if prefix_symbol_name else 0.0
+        prefix_gap = text_height * 0.25 if prefix_symbol_name else 0.0
+        text_width = (
+            max(len(label) * text_height * TEXT_WIDTH_FACTOR, text_height * 2.0)
+            + prefix_width
+            + prefix_gap
+        )
+        text_clearance = text_height * TEXT_GAP_FACTOR
+        available_width = max(
+            (p2_display - p1_display).Length - (arrow_length * 2.0),
+            0.0
+        )
+        text_fits_inside = text_width + (text_clearance * 2.0) < available_width
+        text_rotation = text_rotation_for_display_line(
+            p1_display,
+            p2_display,
+            text_normal
+        )
+        text_axis = FreeCAD.Vector(dim_direction)
+
+        if text_rotation is not None:
+            try:
+                text_axis = text_rotation.multVec(FreeCAD.Vector(1, 0, 0))
+            except Exception:
+                text_axis = FreeCAD.Vector(dim_direction)
+
+        if text_axis.Length == 0:
+            text_axis = FreeCAD.Vector(dim_direction)
+
+        text_axis.normalize()
+
+        part_p1 = p1 + extension_direction * extension_gap
+        part_p2 = p2 + extension_direction * extension_gap
+        ext1_end = p1_display + extension_direction * extension_overshoot
+        ext2_end = p2_display + extension_direction * extension_overshoot
+        dimension_start = p1_display
+        dimension_end = p2_display
+        text_point = midpoint + offset
+
+        if not text_fits_inside:
+            right_display = p2_display
+            left_display = p1_display
+
+            if p1_display.dot(text_axis) > p2_display.dot(text_axis):
+                right_display = p1_display
+                left_display = p2_display
+
+            if (right_display - p2_display).Length < 1e-6:
+                dimension_end = right_display + text_axis * (arrow_length + text_clearance)
+            else:
+                dimension_start = right_display + text_axis * (arrow_length + text_clearance)
+
+            text_point = right_display + text_axis * (arrow_length + (text_clearance * 2.0))
+        else:
+            text_point = (midpoint + offset) - text_axis * (text_width * 0.5)
 
         if not finite_vector(p1_display) or not finite_vector(p2_display):
             FreeCAD.Console.PrintWarning(
@@ -413,9 +716,29 @@ def make_basic_dimension_display(
             )
             return None
 
+        arrow1 = make_arrowhead_shapes(
+            p1_display,
+            dim_direction,
+            extension_direction,
+            arrow_length,
+            arrow_width,
+            inward=True
+        )
+        arrow2 = make_arrowhead_shapes(
+            p2_display,
+            dim_direction.negative(),
+            extension_direction,
+            arrow_length,
+            arrow_width,
+            inward=True
+        )
         shapes = [
-            Part.makePolygon([p1, p1_display, p2_display, p2]),
+            Part.makePolygon([part_p1, ext1_end]),
+            Part.makePolygon([part_p2, ext2_end]),
+            Part.makePolygon([dimension_start, dimension_end]),
         ]
+        shapes.extend(arrow1)
+        shapes.extend(arrow2)
 
         dim = doc.addObject("Part::Feature", owner_name + "_Display")
         dim.Shape = Part.makeCompound(shapes)
@@ -436,11 +759,25 @@ def make_basic_dimension_display(
                     except Exception:
                         pass
 
+        text_origin = text_point
+        symbol_obj = None
+
+        if prefix_symbol_name:
+            symbol_obj = make_gdt_symbol_geometry(
+                doc,
+                prefix_symbol_name,
+                text_point,
+                text_height * 0.9,
+                text_rotation,
+                owner_name + "_" + prefix_symbol_name + "Symbol"
+            )
+            text_origin = text_point + text_axis * (prefix_width + prefix_gap)
+
         text_obj = make_basic_dimension_text(
-            text_point,
+            text_origin,
             label,
             text_height,
-            text_rotation_for_display_line(p1_display, p2_display, text_normal),
+            text_rotation,
             owner_name + "_Text"
         )
         text_box = None
@@ -451,7 +788,7 @@ def make_basic_dimension_display(
                 text_point,
                 label,
                 text_height,
-                text_rotation_for_display_line(p1_display, p2_display, text_normal),
+                text_rotation,
                 owner_name + "_TextBox"
             )
         doc.recompute()
@@ -464,10 +801,131 @@ def make_basic_dimension_display(
                 p2_display.x, p2_display.y, p2_display.z
             )
         )
-        return dim, text_obj, text_box
+        return dim, text_obj, text_box, symbol_obj
     except Exception as e:
         FreeCAD.Console.PrintWarning(
             "Could not create basic dimension display: {}\n".format(e)
+        )
+        return None
+
+
+def make_radius_dimension_display(
+    doc,
+    center_point,
+    surface_point,
+    label,
+    text_normal=None,
+    owner_name="MBD_Dimension",
+    text_height=None,
+    boxed_text=False
+):
+    try:
+        if center_point is None or surface_point is None:
+            return None
+
+        radius_direction = surface_point - center_point
+
+        if radius_direction.Length <= 1e-9:
+            return None
+
+        radius_direction.normalize()
+
+        if text_height is None:
+            text_height = pmi_text_height(doc)
+
+        normal = None
+
+        if text_normal is not None and finite_vector(text_normal):
+            normal = FreeCAD.Vector(text_normal)
+            normal = normal - radius_direction * normal.dot(radius_direction)
+
+            if normal.Length <= 1e-9:
+                normal = None
+
+        if normal is None:
+            normal = radius_direction.cross(FreeCAD.Vector(0, 0, 1))
+
+            if normal.Length <= 1e-9:
+                normal = radius_direction.cross(FreeCAD.Vector(0, 1, 0))
+
+        if normal.Length <= 1e-9:
+            return None
+
+        normal.normalize()
+        side_direction = normal.cross(radius_direction)
+
+        if side_direction.Length <= 1e-9:
+            return None
+
+        side_direction.normalize()
+        _center, doc_size = document_shape_center_and_size(doc)
+        leader_length = min(
+            max(doc_size * 0.25, text_height * 6.0),
+            MAX_DISPLAY_OFFSET * 0.25
+        )
+        text_gap = text_height * TEXT_GAP_FACTOR
+        arrow_length = text_height * ARROW_LENGTH_FACTOR
+        arrow_width = text_height * ARROW_WIDTH_FACTOR
+        leader_end = surface_point + radius_direction * leader_length
+        text_point = leader_end + radius_direction * (arrow_length + text_gap)
+        rotation = text_rotation_for_display_line(
+            surface_point,
+            leader_end,
+            normal
+        )
+        shapes = [Part.makePolygon([surface_point, leader_end])]
+        shapes.extend(
+            make_arrowhead_shapes(
+                surface_point,
+                radius_direction,
+                side_direction,
+                arrow_length,
+                arrow_width,
+                inward=True
+            )
+        )
+
+        dim = doc.addObject("Part::Feature", owner_name + "_Display")
+        dim.Shape = Part.makeCompound(shapes)
+        dim.Label = dim.Name
+
+        view_obj = getattr(dim, "ViewObject", None)
+
+        if view_obj is not None:
+            for prop, value in [
+                ("LineColor", (1.0, 1.0, 1.0)),
+                ("LineWidth", 1.0),
+            ]:
+                if hasattr(view_obj, prop):
+                    try:
+                        setattr(view_obj, prop, value)
+                    except Exception:
+                        pass
+
+        text_obj = make_basic_dimension_text(
+            text_point,
+            label,
+            text_height,
+            rotation,
+            owner_name + "_Text"
+        )
+        text_box = None
+
+        if boxed_text:
+            text_box = make_basic_dimension_text_box(
+                doc,
+                text_point,
+                label,
+                text_height,
+                rotation,
+                owner_name + "_TextBox"
+            )
+
+        doc.recompute()
+        return dim, text_obj, text_box, None
+    except Exception as e:
+        FreeCAD.Console.PrintWarning(
+            "Could not create radius dimension display: {}\n".format(e)
         )
         return None
 
@@ -476,19 +934,9 @@ def outward_normal_from_shape(doc, shape):
     if shape is None:
         return None
 
-    try:
-        u_min, u_max, v_min, v_max = shape.ParameterRange
-        normal = shape.normalAt(
-            (u_min + u_max) * 0.5,
-            (v_min + v_max) * 0.5
-        )
-    except Exception:
-        try:
-            normal = FreeCAD.Vector(shape.Surface.Axis)
-        except Exception:
-            return None
+    normal = oriented_normal_from_shape(shape)
 
-    if normal.Length == 0:
+    if normal is None:
         return None
 
     normal.normalize()
@@ -504,6 +952,155 @@ def outward_normal_from_shape(doc, shape):
             normal = normal.negative()
 
     return normal
+
+
+def oriented_normal_from_shape(shape):
+    try:
+        u_min, u_max, v_min, v_max = shape.ParameterRange
+        normal = shape.normalAt(
+            (u_min + u_max) * 0.5,
+            (v_min + v_max) * 0.5
+        )
+    except Exception:
+        try:
+            normal = FreeCAD.Vector(shape.Surface.Axis)
+        except Exception:
+            return None
+
+    if normal.Length <= 1e-9:
+        return None
+
+    normal.normalize()
+
+    try:
+        if str(shape.Orientation).lower() == "reversed":
+            normal = normal.negative()
+    except Exception:
+        pass
+
+    return normal
+
+
+def point_inside_shape(shape, point):
+    try:
+        return shape.isInside(point, 1e-5, True)
+    except Exception:
+        try:
+            return shape.distToShape(Part.Vertex(point))[0] <= 1e-5
+        except Exception:
+            return False
+
+
+def direction_enters_solid(owner_obj, point, direction):
+    return distance_to_enter_owner_solid(owner_obj, point, direction) is not None
+
+
+def distance_to_enter_owner_solid(owner_obj, point, direction):
+    if owner_obj is None or point is None or direction is None:
+        return None
+
+    if not finite_vector(direction) or direction.Length <= 1e-9:
+        return None
+
+    try:
+        solid_shape = owner_obj.Shape
+        bbox = solid_shape.BoundBox
+    except Exception:
+        return None
+
+    probe = FreeCAD.Vector(direction)
+    probe.normalize()
+    step = max(
+        min(max(bbox.XLength, bbox.YLength, bbox.ZLength) * 0.01, 1.0),
+        0.025
+    )
+    max_distance = max(bbox.XLength, bbox.YLength, bbox.ZLength) * 2.0 + step
+    distance = step
+
+    while distance <= max_distance:
+        sample = point + probe * distance
+
+        if point_inside_shape(solid_shape, sample):
+            return distance
+
+        distance += step
+
+    return None
+
+
+def outward_normal_from_reference(doc, owner_obj, subelement):
+    shape = reference_shape(owner_obj, subelement)
+    normal = oriented_normal_from_shape(shape)
+
+    if normal is None:
+        return None
+
+    try:
+        point = shape.CenterOfMass
+    except Exception:
+        point = referenced_subelement_center(owner_obj, subelement)
+
+    forward_hit = distance_to_enter_owner_solid(owner_obj, point, normal)
+    reverse_hit = distance_to_enter_owner_solid(owner_obj, point, normal.negative())
+
+    if forward_hit is not None and reverse_hit is None:
+        normal = normal.negative()
+    elif reverse_hit is not None and forward_hit is None:
+        pass
+    elif forward_hit is not None and reverse_hit is not None:
+        if forward_hit < reverse_hit:
+            normal = normal.negative()
+    else:
+        exterior = exterior_direction_from_point(doc, point, normal)
+
+        if exterior is not None:
+            normal = exterior
+
+    return normal
+
+
+def normal_probe_report(doc, owner_obj, subelement):
+    shape = reference_shape(owner_obj, subelement)
+    normal = oriented_normal_from_shape(shape)
+
+    if shape is None or normal is None:
+        return "normal probe unavailable"
+
+    try:
+        point = shape.CenterOfMass
+    except Exception:
+        point = referenced_subelement_center(owner_obj, subelement)
+
+    forward_hit = distance_to_enter_owner_solid(owner_obj, point, normal)
+    reverse_hit = distance_to_enter_owner_solid(owner_obj, point, normal.negative())
+    chosen = outward_normal_from_reference(doc, owner_obj, subelement)
+
+    try:
+        orientation = str(shape.Orientation)
+    except Exception:
+        orientation = "<unknown>"
+
+    def fmt_vector(vector):
+        if vector is None:
+            return "<none>"
+
+        return "({:.6f}, {:.6f}, {:.6f})".format(
+            vector.x,
+            vector.y,
+            vector.z
+        )
+
+    return (
+        "orientation={} point={} oriented_normal={} "
+        "forward_hit={} reverse_hit={} chosen={}"
+    ).format(
+        orientation,
+        fmt_vector(point),
+        fmt_vector(normal),
+        forward_hit,
+        reverse_hit,
+        fmt_vector(chosen)
+    )
 
 
 def reference_shape(obj, subelement=""):
@@ -523,12 +1120,18 @@ def reference_shape(obj, subelement=""):
 
 
 def display_context_for_dimension(doc, ref_obj_1, ref_sub_1, ref_obj_2, ref_sub_2, p1, p2):
-    shape = reference_shape(ref_obj_1, ref_sub_1)
-    normal = outward_normal_from_shape(doc, shape)
+    normal = outward_normal_from_reference(
+        doc,
+        ref_obj_1,
+        ref_sub_1
+    )
 
     if normal is None:
-        shape = reference_shape(ref_obj_2, ref_sub_2)
-        normal = outward_normal_from_shape(doc, shape)
+        normal = outward_normal_from_reference(
+            doc,
+            ref_obj_2,
+            ref_sub_2
+        )
 
     text_normal = normal
     preferred_offset = None
@@ -559,10 +1162,70 @@ def display_context_for_dimension(doc, ref_obj_1, ref_sub_1, ref_obj_2, ref_sub_
     return preferred_offset, text_normal
 
 
+def make_arrowhead_shapes(tip, direction, side_direction, length, width, inward=True):
+    if direction is None or side_direction is None:
+        return []
+
+    if direction.Length == 0 or side_direction.Length == 0:
+        return []
+
+    arrow_direction = FreeCAD.Vector(direction)
+    side = FreeCAD.Vector(side_direction)
+    arrow_direction.normalize()
+    side.normalize()
+
+    if not inward:
+        arrow_direction = arrow_direction.negative()
+
+    base = tip + arrow_direction * length
+    side_offset = side * (width * 0.5)
+
+    return [
+        Part.makePolygon([tip, base + side_offset]),
+        Part.makePolygon([tip, base - side_offset]),
+    ]
+
+
+def choose_dimension_text_side(doc, p1_display, p2_display, dim_direction):
+    doc_center, _doc_size = document_shape_center_and_size(doc)
+
+    if doc_center is None or not finite_vector(doc_center):
+        return 1
+
+    midpoint = p1_display + ((p2_display - p1_display) * 0.5)
+    center_delta = midpoint - doc_center
+
+    if center_delta.Length == 0:
+        return 1
+
+    if center_delta.dot(dim_direction) >= 0:
+        return 1
+
+    return -1
+
+
 def make_basic_dimension_text_box(doc, point, text, height, rotation=None, object_name="MBD_BasicDimension_TextBox"):
     try:
-        width = max(len(text) * height * 0.62, height * 2.0)
+        width = max(len(text) * height * TEXT_WIDTH_FACTOR, height * 2.0)
         padding = height * 0.35
+        return make_annotation_box(
+            doc,
+            point,
+            width,
+            height,
+            padding,
+            rotation,
+            object_name
+        )
+    except Exception as e:
+        FreeCAD.Console.PrintWarning(
+            "Could not create basic dimension text box: {}\n".format(e)
+        )
+        return None
+
+
+def make_annotation_box(doc, point, width, height, padding, rotation=None, object_name="MBD_Annotation_Box"):
+    try:
         local_points = [
             FreeCAD.Vector(-padding, -padding, 0),
             FreeCAD.Vector(width + padding, -padding, 0),
@@ -593,9 +1256,56 @@ def make_basic_dimension_text_box(doc, point, text, height, rotation=None, objec
         return box_obj
     except Exception as e:
         FreeCAD.Console.PrintWarning(
-            "Could not create basic dimension text box: {}\n".format(e)
+            "Could not create annotation box: {}\n".format(e)
         )
         return None
+
+
+def make_line_feature(doc, p1, p2, object_name="MBD_Line"):
+    try:
+        if p1 is None or p2 is None:
+            return None
+
+        if (p2 - p1).Length <= 1e-9:
+            return None
+
+        line_obj = doc.addObject("Part::Feature", object_name)
+        line_obj.Shape = Part.makePolygon([p1, p2])
+        line_obj.Label = line_obj.Name
+
+        view_obj = getattr(line_obj, "ViewObject", None)
+
+        if view_obj is not None:
+            for prop, value in [
+                ("LineColor", (1.0, 1.0, 1.0)),
+                ("LineWidth", 1.0),
+            ]:
+                if hasattr(view_obj, prop):
+                    try:
+                        setattr(view_obj, prop, value)
+                    except Exception:
+                        pass
+
+        return line_obj
+    except Exception as e:
+        FreeCAD.Console.PrintWarning(
+            "Could not create display line: {}\n".format(e)
+        )
+        return None
+
+
+def add_display_children(parent_obj, *children):
+    if parent_obj is None or not hasattr(parent_obj, "addObject"):
+        return
+
+    for child in children:
+        if child is None:
+            continue
+
+        try:
+            parent_obj.addObject(child)
+        except Exception:
+            pass
 
 
 def make_basic_dimension_text(point, text, height, rotation=None, object_name="MBD_BasicDimension_Text"):
@@ -704,6 +1414,345 @@ def make_pmi_label_text(doc, point, text, owner_name, normal=None, height=None):
     )
 
 
+def symbol_polyline(local_points, placement):
+    return Part.makePolygon([placement.multVec(point) for point in local_points])
+
+
+def symbol_arc_points(cx, cy, rx, ry, start_degrees, end_degrees, segments=24):
+    if segments < 2:
+        segments = 2
+
+    return [
+        FreeCAD.Vector(
+            cx + rx * math.cos(math.radians(start_degrees + (end_degrees - start_degrees) * index / segments)),
+            cy + ry * math.sin(math.radians(start_degrees + (end_degrees - start_degrees) * index / segments)),
+            0
+        )
+        for index in range(segments + 1)
+    ]
+
+
+def symbol_circle_points(cx, cy, radius, segments=48):
+    points = symbol_arc_points(cx, cy, radius, radius, 0, 360, segments)
+    points.append(points[0])
+    return points
+
+
+def symbol_ellipse_points(cx, cy, rx, ry, segments=48):
+    points = symbol_arc_points(cx, cy, rx, ry, 0, 360, segments)
+    points.append(points[0])
+    return points
+
+
+def make_gdt_symbol_geometry(doc, symbol_name, point, size, rotation=None, object_name="MBD_GDT_Symbol"):
+    try:
+        placement = FreeCAD.Placement(point, rotation or FreeCAD.Rotation())
+        shapes = []
+
+        def add_line(x1, y1, x2, y2):
+            shapes.append(symbol_polyline([
+                FreeCAD.Vector(x1 * size, y1 * size, 0),
+                FreeCAD.Vector(x2 * size, y2 * size, 0),
+            ], placement))
+
+        def add_poly(points):
+            shapes.append(symbol_polyline([
+                FreeCAD.Vector(x * size, y * size, 0)
+                for x, y in points
+            ], placement))
+
+        def add_arc(cx, cy, rx, ry, start_degrees, end_degrees):
+            shapes.append(symbol_polyline([
+                FreeCAD.Vector(point.x * size, point.y * size, 0)
+                for point in symbol_arc_points(cx, cy, rx, ry, start_degrees, end_degrees)
+            ], placement))
+
+        def add_circle(cx, cy, radius):
+            shapes.append(symbol_polyline([
+                FreeCAD.Vector(point.x * size, point.y * size, 0)
+                for point in symbol_circle_points(cx, cy, radius)
+            ], placement))
+
+        def add_ellipse(cx, cy, rx, ry):
+            shapes.append(symbol_polyline([
+                FreeCAD.Vector(point.x * size, point.y * size, 0)
+                for point in symbol_ellipse_points(cx, cy, rx, ry)
+            ], placement))
+
+        def add_arrow(x1, y1, x2, y2):
+            add_line(x1, y1, x2, y2)
+            direction = FreeCAD.Vector(x2 - x1, y2 - y1, 0)
+
+            if direction.Length <= 1e-9:
+                return
+
+            direction.normalize()
+            side = FreeCAD.Vector(-direction.y, direction.x, 0)
+            tip = FreeCAD.Vector(x2, y2, 0)
+            base = tip - direction * 0.16
+            left = base + side * 0.06
+            right = base - side * 0.06
+            add_line(tip.x, tip.y, left.x, left.y)
+            add_line(tip.x, tip.y, right.x, right.y)
+
+        if symbol_name == "Straightness":
+            add_line(0.15, 0.50, 0.85, 0.50)
+        elif symbol_name == "Flatness":
+            add_poly([(0.18, 0.38), (0.82, 0.38), (0.70, 0.62), (0.06, 0.62), (0.18, 0.38)])
+        elif symbol_name == "Circularity":
+            add_circle(0.50, 0.50, 0.28)
+        elif symbol_name == "Cylindricity":
+            add_circle(0.50, 0.50, 0.18)
+            add_line(0.18, 0.18, 0.46, 0.82)
+            add_line(0.54, 0.18, 0.82, 0.82)
+        elif symbol_name == "Profile of a Line":
+            add_arc(0.50, 0.28, 0.35, 0.35, 25, 155)
+        elif symbol_name == "Profile of a Surface":
+            add_arc(0.50, 0.35, 0.35, 0.30, 20, 160)
+            add_line(0.18, 0.35, 0.82, 0.35)
+        elif symbol_name == "Angularity":
+            add_line(0.18, 0.25, 0.82, 0.25)
+            add_line(0.28, 0.25, 0.70, 0.75)
+        elif symbol_name == "Perpendicularity":
+            add_line(0.18, 0.25, 0.82, 0.25)
+            add_line(0.50, 0.25, 0.50, 0.78)
+        elif symbol_name == "Parallelism":
+            add_line(0.28, 0.22, 0.50, 0.78)
+            add_line(0.50, 0.22, 0.72, 0.78)
+        elif symbol_name == "Position":
+            add_circle(0.50, 0.50, 0.26)
+            add_line(0.18, 0.50, 0.82, 0.50)
+            add_line(0.50, 0.18, 0.50, 0.82)
+        elif symbol_name == "Concentricity":
+            add_circle(0.50, 0.50, 0.29)
+            add_circle(0.50, 0.50, 0.14)
+        elif symbol_name == "Symmetry":
+            add_line(0.22, 0.35, 0.78, 0.35)
+            add_line(0.12, 0.50, 0.88, 0.50)
+            add_line(0.22, 0.65, 0.78, 0.65)
+        elif symbol_name == "Circular Runout":
+            add_arrow(0.22, 0.28, 0.78, 0.72)
+        elif symbol_name == "Total Runout":
+            add_line(0.22, 0.28, 0.42, 0.28)
+            add_arrow(0.22, 0.28, 0.58, 0.72)
+            add_arrow(0.42, 0.28, 0.78, 0.72)
+        elif symbol_name == "Diameter":
+            add_circle(0.50, 0.50, 0.26)
+            add_line(0.28, 0.22, 0.72, 0.78)
+        else:
+            add_circle(0.50, 0.50, 0.25)
+
+        symbol_obj = doc.addObject("Part::Feature", object_name)
+        symbol_obj.Shape = Part.makeCompound(shapes)
+        symbol_obj.Label = object_name
+
+        view_obj = getattr(symbol_obj, "ViewObject", None)
+
+        if view_obj is not None:
+            for prop, value in [
+                ("LineColor", (1.0, 1.0, 1.0)),
+                ("LineWidth", 1.0),
+            ]:
+                if hasattr(view_obj, prop):
+                    try:
+                        setattr(view_obj, prop, value)
+                    except Exception:
+                        pass
+
+        return symbol_obj
+    except Exception as e:
+        FreeCAD.Console.PrintWarning(
+            "Could not create GD&T symbol geometry {}: {}\n".format(
+                symbol_name,
+                e
+            )
+        )
+        return None
+
+
+def create_geometric_tolerance_symbol_table(doc=None):
+    if doc is None:
+        doc = FreeCAD.ActiveDocument
+
+    if doc is None:
+        doc = FreeCAD.newDocument("MBD_GDTSymbolTable")
+
+    center, doc_size = document_shape_center_and_size(doc)
+
+    if center is None:
+        center = FreeCAD.Vector(0, 0, 0)
+
+    height = pmi_text_height(doc)
+    row_height = height * 2.0
+    symbol_col_width = height * 5.0
+    label_col_width = height * 14.0
+    table_width = symbol_col_width + label_col_width
+    table_height = row_height * (len(GEOMETRIC_TOLERANCE_SYMBOLS) + 1)
+    origin = center + FreeCAD.Vector(doc_size * 0.75, doc_size * 0.75, doc_size * 0.75)
+
+    group = doc.addObject("App::DocumentObjectGroup", "MBD_GDTSymbolTable")
+    group.Label = "MBD GD&T Symbol Table"
+
+    def add_to_group(obj):
+        if obj is not None:
+            try:
+                group.addObject(obj)
+            except Exception:
+                pass
+
+    title = make_basic_dimension_text(
+        origin,
+        "GD&T Symbol Rendering Test",
+        height,
+        None,
+        group.Name + "_Title"
+    )
+    add_to_group(title)
+
+    header_y = -row_height
+    symbol_header = make_basic_dimension_text(
+        origin + FreeCAD.Vector(height * 0.3, header_y, 0),
+        "Symbol",
+        height,
+        None,
+        group.Name + "_SymbolHeader"
+    )
+    label_header = make_basic_dimension_text(
+        origin + FreeCAD.Vector(symbol_col_width + height * 0.3, header_y, 0),
+        "Name",
+        height,
+        None,
+        group.Name + "_NameHeader"
+    )
+    add_to_group(symbol_header)
+    add_to_group(label_header)
+
+    header_frame = make_annotation_box(
+        doc,
+        origin + FreeCAD.Vector(0, header_y, 0),
+        table_width,
+        height,
+        height * 0.35,
+        None,
+        group.Name + "_HeaderFrame"
+    )
+    add_to_group(header_frame)
+
+    for index, (name, _symbol) in enumerate(GEOMETRIC_TOLERANCE_SYMBOLS):
+        y = -row_height * (index + 2)
+        symbol_obj = make_gdt_symbol_geometry(
+            doc,
+            name,
+            origin + FreeCAD.Vector(height * 0.8, y - height * 0.05, 0),
+            height * 1.15,
+            None,
+            "{}_{:02d}_Symbol".format(group.Name, index + 1)
+        )
+        label_text = make_basic_dimension_text(
+            origin + FreeCAD.Vector(symbol_col_width + height * 0.3, y, 0),
+            name,
+            height,
+            None,
+            "{}_{:02d}_Label".format(group.Name, index + 1)
+        )
+        row_frame = make_annotation_box(
+            doc,
+            origin + FreeCAD.Vector(0, y, 0),
+            table_width,
+            height,
+            height * 0.35,
+            None,
+            "{}_{:02d}_Frame".format(group.Name, index + 1)
+        )
+        separator = make_line_feature(
+            doc,
+            origin + FreeCAD.Vector(symbol_col_width, y - height * 0.35, 0),
+            origin + FreeCAD.Vector(symbol_col_width, y + height * 1.35, 0),
+            "{}_{:02d}_Separator".format(group.Name, index + 1)
+        )
+        add_to_group(symbol_obj)
+        add_to_group(label_text)
+        add_to_group(row_frame)
+        add_to_group(separator)
+
+    doc.recompute()
+    FreeCAD.Console.PrintMessage(
+        "Created GD&T symbol rendering table with {} symbols.\n".format(
+            len(GEOMETRIC_TOLERANCE_SYMBOLS)
+        )
+    )
+    return group
+
+
+def make_datum_triangle(doc, tip, normal, height, rotation=None, object_name="MBD_Datum_Triangle"):
+    try:
+        if normal is None or not finite_vector(normal):
+            return None
+
+        marker_height = height * 1.2
+        marker_width = height * 0.9
+        local_points = [
+            FreeCAD.Vector(0, -marker_width * 0.5, 0),
+            FreeCAD.Vector(0, marker_width * 0.5, 0),
+            FreeCAD.Vector(marker_height, 0, 0),
+            FreeCAD.Vector(0, -marker_width * 0.5, 0),
+        ]
+        placement = FreeCAD.Placement(tip, rotation or FreeCAD.Rotation())
+        points = [placement.multVec(local_point) for local_point in local_points]
+        marker = doc.addObject("Part::Feature", object_name)
+        marker.Shape = Part.makePolygon(points)
+        marker.Label = marker.Name
+
+        view_obj = getattr(marker, "ViewObject", None)
+
+        if view_obj is not None:
+            for prop, value in [
+                ("LineColor", (1.0, 1.0, 1.0)),
+                ("LineWidth", 1.0),
+            ]:
+                if hasattr(view_obj, prop):
+                    try:
+                        setattr(view_obj, prop, value)
+                    except Exception:
+                        pass
+
+        return marker
+    except Exception as e:
+        FreeCAD.Console.PrintWarning(
+            "Could not create datum triangle marker: {}\n".format(e)
+        )
+        return None
+
+
+def datum_symbol_rotation(leader_direction):
+    if leader_direction is None or not finite_vector(leader_direction):
+        return None
+
+    x_axis = FreeCAD.Vector(leader_direction)
+
+    if x_axis.Length <= 1e-9:
+        return None
+
+    x_axis.normalize()
+    z_axis = x_axis.cross(FreeCAD.Vector(0, 0, 1))
+
+    if z_axis.Length <= 1e-9:
+        z_axis = x_axis.cross(FreeCAD.Vector(0, 1, 0))
+
+    if z_axis.Length <= 1e-9:
+        return None
+
+    z_axis.normalize()
+    y_axis = z_axis.cross(x_axis)
+
+    if y_axis.Length <= 1e-9:
+        return None
+
+    y_axis.normalize()
+
+    return FreeCAD.Rotation(x_axis, y_axis, z_axis, "XYZ")
+
+
 def create_datum_display_text(doc, datum_obj):
     normal = datum_outward_normal(doc, datum_obj)
     point = referenced_subelement_center(
@@ -711,16 +1760,80 @@ def create_datum_display_text(doc, datum_obj):
         datum_obj.ReferencedSubelement
     )
 
-    text_obj = make_pmi_label_text(
+    if point is None:
+        return None
+
+    height = pmi_text_height(doc)
+    leader_direction = FreeCAD.Vector(0, 0, 1)
+
+    if normal is not None and finite_vector(normal) and normal.Length > 0:
+        leader_direction = FreeCAD.Vector(normal)
+
+    leader_direction.normalize()
+    rotation = datum_symbol_rotation(leader_direction)
+    triangle_length = height * 1.2
+    gap = height * 0.25
+    leader_length = height * 1.6
+    box_width = max(len(datum_obj.DatumLabel) * height * TEXT_WIDTH_FACTOR, height)
+    box_height = height
+    box_origin = point + leader_direction * (triangle_length + gap + leader_length + gap)
+
+    text_obj = make_basic_dimension_text(
+        box_origin,
+        datum_obj.DatumLabel,
+        height,
+        rotation,
+        datum_obj.Name + "_Text"
+    )
+    frame_obj = make_annotation_box(
+        doc,
+        box_origin,
+        box_width,
+        box_height,
+        height * 0.25,
+        rotation,
+        datum_obj.Name + "_Frame"
+    )
+    marker_obj = make_datum_triangle(
         doc,
         point,
-        datum_obj.DatumLabel,
-        datum_obj.Name,
-        normal
+        normal,
+        height,
+        rotation,
+        datum_obj.Name + "_Marker"
+    )
+    leader_obj = make_line_feature(
+        doc,
+        point + leader_direction * triangle_length,
+        point + leader_direction * (triangle_length + leader_length),
+        datum_obj.Name + "_Leader"
     )
 
     if text_obj is not None:
         datum_obj.DisplayText = text_obj
+
+    if hasattr(datum_obj, "DisplayFrame") and frame_obj is not None:
+        datum_obj.DisplayFrame = frame_obj
+
+    if hasattr(datum_obj, "DisplayMarker") and marker_obj is not None:
+        datum_obj.DisplayMarker = marker_obj
+
+    if hasattr(datum_obj, "DisplayLeader") and leader_obj is not None:
+        datum_obj.DisplayLeader = leader_obj
+
+    add_display_children(datum_obj, marker_obj, leader_obj, frame_obj, text_obj)
+    plane_normal = rotation.multVec(FreeCAD.Vector(0, 0, 1)) if rotation else normal
+    reading_direction = (
+        rotation.multVec(FreeCAD.Vector(1, 0, 0))
+        if rotation else leader_direction
+    )
+    update_pmi_display_layout(
+        datum_obj,
+        box_origin,
+        plane_normal,
+        reading_direction,
+        height
+    )
 
     return text_obj
 
@@ -744,38 +1857,484 @@ def create_datum_target_display_text(doc, target_obj):
     if text_obj is not None:
         target_obj.DisplayText = text_obj
 
+    add_display_children(target_obj, text_obj)
+
+    if text_obj is not None:
+        rotation = text_obj.Placement.Rotation
+        text_height = getattr(
+            text_obj.ViewObject,
+            "FontSize",
+            pmi_text_height(doc)
+        )
+
+        if hasattr(text_height, "Value"):
+            text_height = text_height.Value
+
+        update_pmi_display_layout(
+            target_obj,
+            text_obj.Placement.Base,
+            rotation.multVec(FreeCAD.Vector(0, 0, 1)),
+            rotation.multVec(FreeCAD.Vector(1, 0, 0)),
+            text_height
+        )
+
     return text_obj
+
+
+def fcf_display_label(fcf_obj):
+    zone = ""
+
+    if getattr(fcf_obj, "DiameterZone", False):
+        zone = "DIA "
+
+    tolerance = FreeCAD.Units.Quantity(
+        fcf_obj.ToleranceValue,
+        FreeCAD.Units.Length
+    ).UserString
+    pieces = [
+        str(fcf_obj.ToleranceType).upper(),
+        zone + tolerance,
+    ]
+    datum_label = ""
+
+    if hasattr(fcf_obj, "DatumReference") and fcf_obj.DatumReference is not None:
+        datum = fcf_obj.DatumReference
+
+        if hasattr(datum, "DatumLabel"):
+            datum_label = datum.DatumLabel
+    else:
+        datum_label = datum_system_label(getattr(fcf_obj, "DatumSystem", None))
+
+    if datum_label:
+        pieces.append(datum_label)
+
+    return " | ".join(pieces)
+
+
+def fcf_tolerance_symbol(tolerance_type):
+    if str(tolerance_type) == "Angularity":
+        return "∠"
+
+    if str(tolerance_type) == "Circularity":
+        return "○"
+
+    if str(tolerance_type) == "CircularRunout":
+        return "↗"
+
+    if str(tolerance_type) == "Cylindricity":
+        return "⌭"
+
+    if str(tolerance_type) == "Position":
+        return "⌖"
+
+    if str(tolerance_type) == "LineProfile":
+        return "⌒"
+
+    if str(tolerance_type) == "Flatness":
+        return "⏥"
+
+    if str(tolerance_type) == "Parallelism":
+        return "∥"
+
+    if str(tolerance_type) == "Perpendicularity":
+        return "⟂"
+
+    if str(tolerance_type) == "Profile":
+        return "⌓"
+
+    if str(tolerance_type) == "Straightness":
+        return "⏤"
+
+    if str(tolerance_type) == "TotalRunout":
+        return "⌰"
+
+    return str(tolerance_type).upper()
+
+
+def fcf_cells(fcf_obj):
+    tolerance = FreeCAD.Units.Quantity(
+        fcf_obj.ToleranceValue,
+        FreeCAD.Units.Length
+    ).UserString
+
+    if getattr(fcf_obj, "DiameterZone", False):
+        tolerance = "⌀ " + tolerance
+
+    cells = [
+        fcf_tolerance_symbol(fcf_obj.ToleranceType),
+        tolerance,
+    ]
+
+    if (
+        str(fcf_obj.ToleranceType) == "Profile"
+        and getattr(fcf_obj, "ProfileAllOver", False)
+    ):
+        cells.append("ALL OVER")
+
+    if hasattr(fcf_obj, "DatumReference") and fcf_obj.DatumReference is not None:
+        datum = fcf_obj.DatumReference
+
+        if hasattr(datum, "DatumLabel"):
+            cells.append(datum.DatumLabel)
+    elif fcf_obj.DatumSystem is not None:
+        for _role_name, datums in datum_system_compartments(
+            fcf_obj.DatumSystem
+        ):
+            label = datum_compartment_label(datums)
+
+            if label:
+                cells.append(label)
+
+    return cells
+
+
+def parse_length_quantity_text(text):
+    return FreeCAD.Units.Quantity(str(text)).Value
+
+
+def gdt_symbol_name_for_fcf_cell(cell):
+    return {
+        "⌖": "Position",
+        "⏥": "Flatness",
+        "∥": "Parallelism",
+        "⟂": "Perpendicularity",
+        "⌒": "Profile of a Line",
+        "⌓": "Profile of a Surface",
+        "∠": "Angularity",
+        "○": "Circularity",
+        "⌭": "Cylindricity",
+        "⏤": "Straightness",
+        "↗": "Circular Runout",
+        "⌰": "Total Runout",
+    }.get(cell)
+
+
+def fcf_cell_layout(cells, height):
+    padding = height * 0.3
+    cell_widths = [
+        max(len(cell) * height * TEXT_WIDTH_FACTOR, height * 1.6)
+        for cell in cells
+    ]
+    frame_height = height + padding * 2.0
+    cell_spans = [width + padding * 2.0 for width in cell_widths]
+    total_width = sum(cell_spans)
+    return padding, cell_widths, cell_spans, frame_height, total_width
+
+
+def make_fcf_frame(doc, origin, cells, height, rotation=None, object_name="MBD_FCF_Frame"):
+    try:
+        _padding, _cell_widths, cell_spans, frame_height, total_width = fcf_cell_layout(
+            cells,
+            height
+        )
+        local_lines = []
+        x = 0.0
+        local_lines.append((FreeCAD.Vector(0, 0, 0), FreeCAD.Vector(total_width, 0, 0)))
+        local_lines.append((FreeCAD.Vector(total_width, 0, 0), FreeCAD.Vector(total_width, frame_height, 0)))
+        local_lines.append((FreeCAD.Vector(total_width, frame_height, 0), FreeCAD.Vector(0, frame_height, 0)))
+        local_lines.append((FreeCAD.Vector(0, frame_height, 0), FreeCAD.Vector(0, 0, 0)))
+
+        for span in cell_spans[:-1]:
+            x += span
+            local_lines.append((FreeCAD.Vector(x, 0, 0), FreeCAD.Vector(x, frame_height, 0)))
+
+        placement = FreeCAD.Placement(origin, rotation or FreeCAD.Rotation())
+        shapes = [
+            Part.makePolygon([
+                placement.multVec(start),
+                placement.multVec(end),
+            ])
+            for start, end in local_lines
+        ]
+        frame_obj = doc.addObject("Part::Feature", object_name)
+        frame_obj.Shape = Part.makeCompound(shapes)
+        frame_obj.Label = frame_obj.Name
+
+        view_obj = getattr(frame_obj, "ViewObject", None)
+
+        if view_obj is not None:
+            for prop, value in [
+                ("LineColor", (1.0, 1.0, 1.0)),
+                ("LineWidth", 1.0),
+            ]:
+                if hasattr(view_obj, prop):
+                    try:
+                        setattr(view_obj, prop, value)
+                    except Exception:
+                        pass
+
+        return frame_obj
+    except Exception as e:
+        FreeCAD.Console.PrintWarning(
+            "Could not create FCF frame: {}\n".format(e)
+        )
+        return None
+
+
+def make_fcf_cell_texts(doc, origin, cells, height, rotation=None, object_name="MBD_FCF_Text"):
+    padding, _cell_widths, cell_spans, _frame_height, _total_width = fcf_cell_layout(
+        cells,
+        height
+    )
+    placement = FreeCAD.Placement(origin, rotation or FreeCAD.Rotation())
+    text_objects = []
+    x = 0.0
+
+    for index, cell in enumerate(cells):
+        symbol_name = gdt_symbol_name_for_fcf_cell(cell)
+
+        if symbol_name is not None:
+            symbol_size = height * 0.95
+            symbol_x = x + (cell_spans[index] - symbol_size) * 0.5
+            symbol_point = placement.multVec(FreeCAD.Vector(symbol_x, padding * 0.6, 0))
+            symbol_obj = make_gdt_symbol_geometry(
+                doc,
+                symbol_name,
+                symbol_point,
+                symbol_size,
+                rotation,
+                "{}{:02d}_{}Symbol".format(
+                    object_name,
+                    index + 1,
+                    symbol_name
+                )
+            )
+
+            if symbol_obj is not None:
+                text_objects.append(symbol_obj)
+        elif cell.startswith("⌀ "):
+            text = cell[2:].strip()
+            symbol_size = height * 0.75
+            gap = height * 0.25
+            text_width = len(text) * height * TEXT_WIDTH_FACTOR
+            combined_width = symbol_size + gap + text_width
+            start_x = x + max((cell_spans[index] - combined_width) * 0.5, padding * 0.5)
+            symbol_point = placement.multVec(FreeCAD.Vector(start_x, padding * 0.7, 0))
+            text_point = placement.multVec(FreeCAD.Vector(start_x + symbol_size + gap, padding, 0))
+            symbol_obj = make_gdt_symbol_geometry(
+                doc,
+                "Diameter",
+                symbol_point,
+                symbol_size,
+                rotation,
+                "{}{:02d}_DiameterSymbol".format(object_name, index + 1)
+            )
+            text_obj = make_basic_dimension_text(
+                text_point,
+                text,
+                height,
+                rotation,
+                "{}{:02d}".format(object_name, index + 1)
+            )
+
+            if symbol_obj is not None:
+                text_objects.append(symbol_obj)
+
+            if text_obj is not None:
+                text_objects.append(text_obj)
+        else:
+            text_width = len(cell) * height * TEXT_WIDTH_FACTOR
+            text_x = x + max((cell_spans[index] - text_width) * 0.5, padding * 0.5)
+            text_point = placement.multVec(FreeCAD.Vector(text_x, padding, 0))
+            text_obj = make_basic_dimension_text(
+                text_point,
+                cell,
+                height,
+                rotation,
+                "{}{:02d}".format(object_name, index + 1)
+            )
+
+            if text_obj is not None:
+                text_objects.append(text_obj)
+
+        x += cell_spans[index]
+
+    return text_objects
+
+
+def dimension_references_feature(dim_obj, controlled_obj, controlled_sub):
+    if dim_obj is None or controlled_obj is None:
+        return False
+
+    for obj_prop, sub_prop in [
+        ("ReferenceObject1", "ReferenceSubelement1"),
+        ("ReferenceObject2", "ReferenceSubelement2"),
+    ]:
+        try:
+            if (
+                getattr(dim_obj, obj_prop, None) == controlled_obj
+                and getattr(dim_obj, sub_prop, "") == controlled_sub
+            ):
+                return True
+        except Exception:
+            pass
+
+    return False
+
+
+def find_control_dimension_for_fcf(doc, fcf_obj):
+    for obj in reversed(doc.Objects):
+        if not hasattr(obj, "DimensionKind"):
+            continue
+
+        if dimension_references_feature(
+            obj,
+            fcf_obj.ControlledObject,
+            fcf_obj.ControlledSubelement
+        ):
+            return obj
+
+    return None
+
+
+def fcf_origin_below_dimension(doc, fcf_obj, text_height, fallback_origin, fallback_rotation):
+    dim_obj = find_control_dimension_for_fcf(doc, fcf_obj)
+
+    if dim_obj is None or getattr(dim_obj, "DisplayText", None) is None:
+        return fallback_origin, fallback_rotation
+
+    try:
+        dim_text = dim_obj.DisplayText
+        placement = dim_text.Placement
+        rotation = placement.Rotation
+        origin = placement.Base + rotation.multVec(FreeCAD.Vector(0, -text_height * 2.1, 0))
+        return origin, rotation
+    except Exception:
+        return fallback_origin, fallback_rotation
+
+
+def create_fcf_display(doc, fcf_obj):
+    point = referenced_subelement_center(
+        fcf_obj.ControlledObject,
+        fcf_obj.ControlledSubelement
+    )
+    normal = None
+
+    if (
+        point is None
+        and str(getattr(fcf_obj, "ToleranceType", "")) == "Profile"
+        and getattr(fcf_obj, "ProfileAllOver", False)
+    ):
+        try:
+            bbox = fcf_obj.ControlledObject.Shape.BoundBox
+            point = FreeCAD.Vector(
+                (bbox.XMin + bbox.XMax) * 0.5,
+                (bbox.YMin + bbox.YMax) * 0.5,
+                bbox.ZMax
+            )
+            normal = FreeCAD.Vector(0, 0, 1)
+        except Exception:
+            point = None
+
+    if point is None:
+        return None
+
+    if normal is None:
+        normal = outward_normal_from_reference(
+            doc,
+            fcf_obj.ControlledObject,
+            fcf_obj.ControlledSubelement
+        )
+    text_height = pmi_text_height(doc)
+    display_direction = FreeCAD.Vector(0, 0, 1)
+
+    if normal is not None:
+        display_direction = FreeCAD.Vector(normal)
+
+    offset = preferred_display_offset_beyond_model(
+        doc,
+        point,
+        point,
+        display_direction,
+        text_height
+    )
+
+    if offset is None:
+        _, doc_size = document_shape_center_and_size(doc)
+        offset_length = min(max(doc_size * 0.9, 20.0), MAX_DISPLAY_OFFSET * 0.12)
+        offset = FreeCAD.Vector(display_direction)
+
+        if offset.Length <= 1e-9:
+            offset = FreeCAD.Vector(0, 0, 1)
+
+        offset.normalize()
+        offset.multiply(offset_length)
+
+    normal = display_direction
+
+    frame_origin = point + offset
+    cells = fcf_cells(fcf_obj)
+    rotation = None
+
+    if normal is not None:
+        rotation = text_rotation_for_display_line(
+            frame_origin,
+            frame_origin + FreeCAD.Vector(1, 0, 0),
+            normal
+        )
+
+    if str(fcf_obj.ToleranceType) == "Position":
+        frame_origin, rotation = fcf_origin_below_dimension(
+            doc,
+            fcf_obj,
+            text_height,
+            frame_origin,
+            rotation
+        )
+
+    text_objects = make_fcf_cell_texts(
+        doc,
+        frame_origin,
+        cells,
+        text_height,
+        rotation,
+        fcf_obj.Name + "_Text"
+    )
+    frame_obj = make_fcf_frame(
+        doc,
+        frame_origin,
+        cells,
+        text_height,
+        rotation,
+        fcf_obj.Name + "_Frame"
+    )
+    leader_obj = make_line_feature(doc, point, frame_origin, fcf_obj.Name + "_Leader")
+    text_obj = text_objects[0] if text_objects else None
+
+    fcf_obj.DisplayText = text_obj
+    fcf_obj.DisplayFrame = frame_obj
+    fcf_obj.DisplayLeader = leader_obj
+    add_display_children(fcf_obj, frame_obj, leader_obj, *text_objects)
+    plane_normal = (
+        rotation.multVec(FreeCAD.Vector(0, 0, 1))
+        if rotation else normal
+    )
+    reading_direction = (
+        rotation.multVec(FreeCAD.Vector(1, 0, 0))
+        if rotation else FreeCAD.Vector(1, 0, 0)
+    )
+    update_pmi_display_layout(
+        fcf_obj,
+        frame_origin,
+        plane_normal,
+        reading_direction,
+        text_height
+    )
+
+    return frame_obj, text_obj, leader_obj
 
 
 def datum_outward_normal(doc, datum_obj):
     surface = surface_from_datum_reference(datum_obj)
-    doc_center, _ = document_shape_center_and_size(doc)
 
     if surface is None:
         return None
 
-    try:
-        u_min, u_max, v_min, v_max = surface.ParameterRange
-        normal = surface.normalAt(
-            (u_min + u_max) * 0.5,
-            (v_min + v_max) * 0.5
-        )
-    except Exception:
-        return None
-
-    if normal.Length == 0:
-        return None
-
-    normal.normalize()
-
-    try:
-        surface_point = surface.CenterOfMass
-    except Exception:
-        surface_point = FreeCAD.Vector(0, 0, 0)
-
-    if doc_center is not None and finite_vector(doc_center):
-        if (surface_point - doc_center).dot(normal) < 0:
-            normal = normal.negative()
+    normal = outward_normal_from_reference(
+        doc,
+        datum_obj.ReferencedObject,
+        datum_obj.ReferencedSubelement
+    )
 
     return normal
 
@@ -786,24 +2345,24 @@ def text_rotation_for_display_line(p1_display, p2_display, outward_normal):
 
     normal = FreeCAD.Vector(outward_normal)
 
-    if normal.Length == 0:
+    if normal.Length <= 1e-9:
         return None
 
     normal.normalize()
     x_axis = p2_display - p1_display
 
-    if x_axis.Length == 0:
+    if x_axis.Length <= 1e-9:
         return None
 
     x_axis = x_axis - normal * x_axis.dot(normal)
 
-    if x_axis.Length == 0:
+    if x_axis.Length <= 1e-9:
         x_axis = normal.cross(FreeCAD.Vector(0, 0, 1))
 
-        if x_axis.Length == 0:
+        if x_axis.Length <= 1e-9:
             x_axis = normal.cross(FreeCAD.Vector(0, 1, 0))
 
-    if x_axis.Length == 0:
+    if x_axis.Length <= 1e-9:
         return None
 
     x_axis.normalize()
@@ -822,7 +2381,7 @@ def text_rotation_for_display_line(p1_display, p2_display, outward_normal):
 
     y_axis = normal.cross(x_axis)
 
-    if y_axis.Length == 0:
+    if y_axis.Length <= 1e-9:
         return None
 
     y_axis.normalize()
@@ -1115,7 +2674,7 @@ def create_dimension_object(
     ref_obj_2=None,
     ref_sub_2="",
     nominal=None,
-    dimension_purpose="PlusMinus",
+    dimension_purpose="EqualBilateral",
     dimension_kind="Linear",
     measurement_type="Distance",
     upper_tolerance=0.0,
@@ -1166,7 +2725,10 @@ def create_dimension_object(
     dim_obj.ReferencePattern = measurement.get("pattern", "")
     dim_obj.ValidationMessage = measurement.get("message", "")
 
-    if str(dimension_kind) in ("Diameter", "Radius"):
+    if (
+        str(dimension_kind) in ("Diameter", "Radius")
+        or str(dim_obj.ReferencePattern) == "PlaneToPlane"
+    ):
         dim_obj.AP242Entity = "DIMENSIONAL_SIZE"
     elif str(dimension_purpose) == "Basic":
         dim_obj.AP242Entity = "DIMENSIONAL_LOCATION"
@@ -1177,6 +2739,7 @@ def create_dimension_object(
 
     update_dimension_signature(dim_obj)
     append_pmi_history(dim_obj, "dimension-attached")
+    add_to_mbd_pmi_group(doc, dim_obj)
 
     if FreeCAD.GuiUp:
         if not hasattr(dim_obj, "addObject"):
@@ -1186,34 +2749,65 @@ def create_dimension_object(
         p2 = measurement.get("point2")
 
         if p1 is not None and p2 is not None:
+            measurement_text_normal = measurement.get("text_normal")
+
+            if text_normal is None and measurement_text_normal is not None:
+                text_normal = measurement_text_normal
+
             if preferred_offset is None and text_normal is None:
-                preferred_offset, text_normal = display_context_for_dimension(
-                    doc,
-                    ref_obj_1,
-                    ref_sub_1,
-                    ref_obj_2,
-                    ref_sub_2,
-                    p1,
-                    p2
-                )
+                display_direction = measurement.get("display_direction")
+
+                if display_direction is not None and finite_vector(display_direction):
+                    text_normal = FreeCAD.Vector(display_direction)
+                    preferred_offset = preferred_display_offset_beyond_model(
+                        doc,
+                        p1,
+                        p2,
+                        display_direction,
+                        pmi_text_height(doc)
+                    )
+                else:
+                    preferred_offset, text_normal = display_context_for_dimension(
+                        doc,
+                        ref_obj_1,
+                        ref_sub_1,
+                        ref_obj_2,
+                        ref_sub_2,
+                        p1,
+                        p2
+                    )
 
             if text_height is None:
                 text_height = pmi_text_height(doc)
 
-            display_objects = make_basic_dimension_display(
-                doc,
-                p1,
-                p2,
-                dimension_display_label(dim_obj),
-                preferred_offset,
-                text_normal,
-                dim_obj.Name,
-                text_height,
-                str(dimension_purpose) == "Basic"
-            )
+            if str(dimension_kind) == "Radius":
+                display_objects = make_radius_dimension_display(
+                    doc,
+                    p1,
+                    p2,
+                    dimension_display_label(dim_obj),
+                    text_normal,
+                    dim_obj.Name,
+                    text_height,
+                    str(dimension_purpose) == "Basic"
+                )
+            else:
+                display_objects = make_basic_dimension_display(
+                    doc,
+                    p1,
+                    p2,
+                    dimension_display_label(dim_obj),
+                    preferred_offset,
+                    text_normal,
+                    dim_obj.Name,
+                    text_height,
+                    str(dimension_purpose) == "Basic",
+                    "Diameter" if str(dimension_kind) == "Diameter" else None
+                )
 
             if display_objects is not None:
-                display_geometry, display_text, display_text_box = display_objects
+                display_geometry, display_text, display_text_box = display_objects[:3]
+                extra_display_objects = display_objects[3:]
                 dim_obj.DisplayDimension = display_geometry
                 dim_obj.DisplayText = display_text
                 dim_obj.DisplayTextBox = display_text_box
@@ -1230,8 +2824,39 @@ def create_dimension_object(
                     if display_text_box is not None:
                         dim_obj.addObject(display_text_box)
                         display_text_box.Label = display_text_box.Name
+
+                    add_display_children(dim_obj, *extra_display_objects)
                 except Exception:
                     pass
+
+                layout_origin = (
+                    display_text.Placement.Base
+                    if display_text is not None
+                    else p1 + ((p2 - p1) * 0.5)
+                )
+                layout_rotation = (
+                    display_text.Placement.Rotation
+                    if display_text is not None
+                    else None
+                )
+                layout_normal = text_normal
+                layout_direction = p2 - p1
+
+                if layout_rotation is not None:
+                    layout_normal = layout_rotation.multVec(
+                        FreeCAD.Vector(0, 0, 1)
+                    )
+                    layout_direction = layout_rotation.multVec(
+                        FreeCAD.Vector(1, 0, 0)
+                    )
+
+                update_pmi_display_layout(
+                    dim_obj,
+                    layout_origin,
+                    layout_normal,
+                    layout_direction,
+                    text_height
+                )
 
     return dim_obj
 
@@ -1278,6 +2903,7 @@ def create_basic_dimension_object(
     dim_obj.ReferenceSubelement2 = ref_sub_2
     update_basic_dimension_signature(dim_obj)
     append_pmi_history(dim_obj, "basic-dimension-attached")
+    add_to_mbd_pmi_group(doc, dim_obj)
 
     display_label = "{}".format(
         FreeCAD.Units.Quantity(
@@ -1318,7 +2944,8 @@ def create_basic_dimension_object(
             )
 
             if display_objects is not None:
-                display_geometry, display_text, display_text_box = display_objects
+                display_geometry, display_text, display_text_box = display_objects[:3]
+                extra_display_objects = display_objects[3:]
                 dim_obj.DisplayDimension = display_geometry
                 dim_obj.DisplayText = display_text
                 dim_obj.DisplayTextBox = display_text_box
@@ -1335,6 +2962,8 @@ def create_basic_dimension_object(
                     if display_text_box is not None:
                         dim_obj.addObject(display_text_box)
                         display_text_box.Label = display_text_box.Name
+
+                    add_display_children(dim_obj, *extra_display_objects)
                 except Exception:
                     pass
 
@@ -1381,6 +3010,7 @@ def create_basic_dimension_from_measurement(
     dim_obj.ReferenceSubelement2 = ref_sub_2
     update_basic_dimension_signature(dim_obj)
     append_pmi_history(dim_obj, "basic-dimension-attached")
+    add_to_mbd_pmi_group(doc, dim_obj)
 
     display_label = "{}".format(
         FreeCAD.Units.Quantity(
@@ -1417,7 +3047,8 @@ def create_basic_dimension_from_measurement(
             )
 
             if display_objects is not None:
-                display_geometry, display_text, display_text_box = display_objects
+                display_geometry, display_text, display_text_box = display_objects[:3]
+                extra_display_objects = display_objects[3:]
                 dim_obj.DisplayDimension = display_geometry
                 dim_obj.DisplayText = display_text
                 dim_obj.DisplayTextBox = display_text_box
@@ -1434,6 +3065,8 @@ def create_basic_dimension_from_measurement(
                     if display_text_box is not None:
                         dim_obj.addObject(display_text_box)
                         display_text_box.Label = display_text_box.Name
+
+                    add_display_children(dim_obj, *extra_display_objects)
                 except Exception:
                     pass
 
@@ -1457,7 +3090,7 @@ class CreateDatumFeatureCommand:
         return {
             "MenuText": "Create Datum Feature",
             "ToolTip": "Create a semantic MBD datum feature from selected geometry",
-            "Pixmap": ""
+            "Pixmap": command_icon("create_datum_feature.svg")
         }
 
     def IsActive(self):
@@ -1524,7 +3157,10 @@ class CreateDatumFeatureCommand:
 
         label = str(label).strip().upper()
 
-        datum_obj = doc.addObject("App::FeaturePython", "MBD_DatumFeature_" + label)
+        datum_obj = doc.addObject(
+            "App::DocumentObjectGroupPython",
+            "MBD_DatumFeature_" + label
+        )
         MBDDatumFeature(datum_obj)
 
         datum_obj.DatumLabel = label
@@ -1532,6 +3168,7 @@ class CreateDatumFeatureCommand:
         datum_obj.ReferencedSubelement = ref_sub
         update_geometry_signature(datum_obj)
         append_pmi_history(datum_obj, "datum-attached")
+        add_to_mbd_pmi_group(doc, datum_obj)
         
         if ref_sub.startswith("Face"):
             datum_obj.DatumType = "Plane"
@@ -1562,7 +3199,7 @@ class ValidatePMICommand:
         return {
             "MenuText": "Validate PMI",
             "ToolTip": "Validate semantic MBD PMI objects",
-            "Pixmap": ""
+            "Pixmap": command_icon("validate_pmi.svg")
         }
 
     def IsActive(self):
@@ -1583,7 +3220,7 @@ class ShowPMIInspectorCommand:
         return {
             "MenuText": "Show PMI Inspector",
             "ToolTip": "Show semantic PMI inspector",
-            "Pixmap": ""
+            "Pixmap": command_icon("show_pmi_inspector.svg")
         }
 
     def IsActive(self):
@@ -1599,7 +3236,7 @@ class CreateDatumTargetCommand:
         return {
             "MenuText": "Create Datum Target",
             "ToolTip": "Create a semantic datum target from a datum and construction point",
-            "Pixmap": ""
+            "Pixmap": command_icon("create_datum_target.svg")
         }
 
     def IsActive(self):
@@ -1665,7 +3302,7 @@ class CreateDatumTargetCommand:
             return
 
         target_obj = doc.addObject(
-            "App::FeaturePython",
+            "App::DocumentObjectGroupPython",
             "MBD_DatumTarget_" + target_id
         )
 
@@ -1684,6 +3321,7 @@ class CreateDatumTargetCommand:
 
         update_datum_target_signature(target_obj)
         append_pmi_history(target_obj, "datum-target-attached")
+        add_to_mbd_pmi_group(doc, target_obj)
 
         if FreeCAD.GuiUp:
             ViewProviderMBDDatumTarget(target_obj.ViewObject)
@@ -1700,162 +3338,13 @@ class CreateDatumTargetCommand:
         )
 
 
-class CreateBasicDimensionCommand:
-
-    def GetResources(self):
-        return {
-            "MenuText": "Create Basic Dimension",
-            "ToolTip": "Create a semantic basic dimension between two compatible references",
-            "Pixmap": ""
-        }
-
-    def IsActive(self):
-        return FreeCAD.ActiveDocument is not None
-
-    def Activated(self):
-        doc = FreeCAD.ActiveDocument
-        selection = FreeCADGui.Selection.getSelectionEx()
-        references = expanded_selection_references(selection)
-
-        if len(references) != 2:
-            QtGui.QMessageBox.warning(
-                None,
-                "Basic Dimension",
-                "Select exactly two compatible references."
-            )
-            return
-
-        ref1, subelement1 = references[0]
-        ref2, subelement2 = references[1]
-        ref_obj_1, sub1 = semantic_reference_for_subelement(
-            doc,
-            ref1,
-            subelement1
-        )
-        ref_obj_2, sub2 = semantic_reference_for_subelement(
-            doc,
-            ref2,
-            subelement2
-        )
-
-        dim_type, ok = QtGui.QInputDialog.getItem(
-            None,
-            "Basic Dimension",
-            "Dimension type:",
-            ["Distance", "X", "Y", "Z"],
-            0,
-            False
-        )
-
-        if not ok:
-            return
-
-        measurement = measurement_from_references(
-            "Linear",
-            dim_type,
-            ref_obj_1,
-            sub1,
-            ref_obj_2,
-            sub2
-        )
-        measured = measurement.get("value")
-
-        if measured is None:
-            QtGui.QMessageBox.warning(
-                None,
-                "Basic Dimension",
-                measurement.get(
-                    "message",
-                    "References must resolve to compatible dimension geometry."
-                )
-            )
-            return
-
-        measured_text = FreeCAD.Units.Quantity(
-            measured,
-            FreeCAD.Units.Length
-        ).UserString
-
-        nominal_text, ok = QtGui.QInputDialog.getText(
-            None,
-            "Basic Dimension",
-            "Nominal value:",
-            text=measured_text
-        )
-
-        if not ok:
-            return
-
-        try:
-            nominal = FreeCAD.Units.Quantity(str(nominal_text)).Value
-        except Exception:
-            QtGui.QMessageBox.warning(
-                None,
-                "Basic Dimension",
-                "Enter a length value such as 1.250 in or 31.75 mm."
-            )
-            return
-
-        preferred_offset = None
-        text_normal = None
-        target_parent_datum = target_parent_datum_for_references(
-            ref_obj_1,
-            ref_obj_2
-        )
-
-        if target_parent_datum is not None:
-            p1 = measurement.get("point1")
-            p2 = measurement.get("point2")
-
-            if p1 is not None and p2 is not None:
-                preferred_offset = datum_plane_display_offset(
-                    doc,
-                    target_parent_datum,
-                    p1,
-                    p2,
-                    0
-                )
-                text_normal = datum_outward_normal(doc, target_parent_datum)
-
-        dim_obj = create_basic_dimension_from_measurement(
-            doc,
-            ref_obj_1,
-            sub1,
-            ref_obj_2,
-            sub2,
-            measurement,
-            nominal,
-            preferred_offset=preferred_offset,
-            text_normal=text_normal,
-            dimension_type=str(dim_type)
-        )
-
-        if dim_obj is None:
-            QtGui.QMessageBox.warning(
-                None,
-                "Basic Dimension",
-                "Could not create the basic dimension."
-            )
-            return
-
-        doc.recompute()
-
-        FreeCAD.Console.PrintMessage(
-            "Created basic dimension {} between {} and {}\n".format(
-                dim_obj.Name,
-                ref_obj_1.Name,
-                ref_obj_2.Name
-            )
-        )
-
-
 class CreateDimensionCommand:
 
     def GetResources(self):
         return {
             "MenuText": "Create Dimension",
             "ToolTip": "Create a semantic AP242-ready dimension between two references",
-            "Pixmap": ""
+            "Pixmap": command_icon("create_dimension.svg")
         }
 
     def IsActive(self):
@@ -1895,7 +3384,7 @@ class CreateDimensionCommand:
             None,
             "Dimension",
             "Dimension purpose:",
-            DIMENSION_PURPOSES,
+            DIMENSION_PURPOSE_CHOICES,
             2,
             False
         )
@@ -1976,7 +3465,7 @@ class CreateDimensionCommand:
                 )
                 return
 
-        if purpose == "PlusMinus":
+        if purpose == "UnequalBilateral":
             upper_text, ok = QtGui.QInputDialog.getText(
                 None,
                 "Dimension",
@@ -2079,150 +3568,68 @@ class CreateDimensionCommand:
         )
 
 
-class CreateTargetBasicDimensionsCommand:
+def choose_datum_system_compartments(datum_objects, initial_datums=None):
+    dialog = QtGui.QDialog()
+    dialog.setWindowTitle("Create Datum System")
+    layout = QtGui.QVBoxLayout(dialog)
+    layout.addWidget(QtGui.QLabel(
+        "Select one or more datum features in each compartment. "
+        "Multiple selections in one compartment form a common datum."
+    ))
 
-    def GetResources(self):
-        return {
-            "MenuText": "Create Target Basic Dimensions",
-            "ToolTip": "Create basic dimensions from datum targets to the other datums in a selected datum system",
-            "Pixmap": ""
-        }
+    initial_datums = list(initial_datums or [])
+    list_widgets = []
 
-    def IsActive(self):
-        return FreeCAD.ActiveDocument is not None
+    for compartment_index, (_prop_name, role_name) in enumerate(
+        DATUM_COMPARTMENT_PROPERTIES
+    ):
+        group_box = QtGui.QGroupBox(role_name)
+        group_layout = QtGui.QVBoxLayout(group_box)
+        list_widget = QtGui.QListWidget()
+        list_widget.setSelectionMode(
+            QtGui.QAbstractItemView.ExtendedSelection
+        )
 
-    def Activated(self):
-        doc = FreeCAD.ActiveDocument
-        selection = FreeCADGui.Selection.getSelection()
-
-        if len(selection) != 1 or not hasattr(selection[0], "PrimaryDatum"):
-            QtGui.QMessageBox.warning(
-                None,
-                "Target Basic Dimensions",
-                "Select exactly one MBD datum system."
-            )
-            return
-
-        datum_system = selection[0]
-        datums = [
-            datum_system.PrimaryDatum,
-            datum_system.SecondaryDatum,
-            datum_system.TertiaryDatum,
-        ]
-        datums = [datum for datum in datums if datum is not None]
-
-        if len(datums) < 2:
-            QtGui.QMessageBox.warning(
-                None,
-                "Target Basic Dimensions",
-                "The selected datum system must contain at least two datums."
-            )
-            return
-
-        existing_keys = set()
-
-        for obj in doc.Objects:
-            if hasattr(obj, "DimensionType") and hasattr(obj, "ReferenceObject1"):
-                existing_keys.add(existing_basic_dimension_key(obj))
-
-        layout_extents = {}
-        batch_text_height = pmi_text_height(doc)
-        created = 0
-        skipped = 0
-        failed = 0
-
-        for target_datum in datums:
-            targets = sorted(
-                get_datum_target_objects(doc, target_datum),
-                key=lambda target: target.TargetId
+        for datum in datum_objects:
+            list_widget.addItem(
+                "{} ({})".format(datum.Label, datum.DatumLabel)
             )
 
-            for target in targets:
-                for reference_datum in datums:
-                    if reference_datum == target_datum:
-                        continue
+        if compartment_index < len(initial_datums):
+            initial_datum = initial_datums[compartment_index]
 
-                    key = basic_dimension_key(target, "", reference_datum, "")
+            for row, datum in enumerate(datum_objects):
+                if datum == initial_datum:
+                    list_widget.item(row).setSelected(True)
+                    break
 
-                    if key in existing_keys:
-                        skipped += 1
-                        continue
+        group_layout.addWidget(list_widget)
+        layout.addWidget(group_box)
+        list_widgets.append(list_widget)
 
-                    p1, p2 = display_points_from_references(
-                        target,
-                        "",
-                        reference_datum,
-                        ""
-                    )
+    buttons = QtGui.QDialogButtonBox(
+        QtGui.QDialogButtonBox.Ok | QtGui.QDialogButtonBox.Cancel
+    )
+    buttons.accepted.connect(dialog.accept)
+    buttons.rejected.connect(dialog.reject)
+    layout.addWidget(buttons)
 
-                    if p1 is None or p2 is None:
-                        failed += 1
-                        continue
+    if dialog.exec_() != QtGui.QDialog.Accepted:
+        return None
 
-                    leader = leader_direction_for_dimension(
-                        doc,
-                        target_datum,
-                        p1,
-                        p2
-                    )
+    compartments = []
 
-                    if leader is None:
-                        failed += 1
-                        continue
+    for list_widget in list_widgets:
+        selected_rows = sorted(
+            list_widget.row(item)
+            for item in list_widget.selectedItems()
+        )
+        compartments.append([
+            datum_objects[row]
+            for row in selected_rows
+        ])
 
-                    stack_key = (
-                        target_datum.Name,
-                        leader_direction_key(leader)
-                    )
-                    current_extent = layout_extents.get(
-                        stack_key,
-                        model_extent_along(doc, leader)
-                    )
-                    preferred_offset, new_extent = offset_beyond_current_extent(
-                        doc,
-                        p1,
-                        p2,
-                        leader,
-                        current_extent,
-                        batch_text_height
-                    )
-                    text_normal = datum_outward_normal(doc, target_datum)
-
-                    dim_obj = create_basic_dimension_object(
-                        doc,
-                        target,
-                        "",
-                        reference_datum,
-                        "",
-                        preferred_offset=preferred_offset,
-                        text_normal=text_normal,
-                        text_height=batch_text_height
-                    )
-
-                    if dim_obj is None:
-                        failed += 1
-                        continue
-
-                    existing_keys.add(key)
-                    layout_extents[stack_key] = new_extent
-                    created += 1
-
-        doc.recompute()
-
-        message = (
-            "Created {} target basic dimensions. "
-            "Skipped {} existing dimensions. "
-            "Failed {} dimensions."
-        ).format(created, skipped, failed)
-
-        FreeCAD.Console.PrintMessage(message + "\n")
-
-        if FreeCAD.GuiUp:
-            QtGui.QMessageBox.information(
-                None,
-                "Target Basic Dimensions",
-                message
-            )
+    return compartments
 
 
 class CreateDatumSystemCommand:
@@ -2231,7 +3638,7 @@ class CreateDatumSystemCommand:
         return {
             "MenuText": "Create Datum System",
             "ToolTip": "Create a semantic datum system from selected datum features",
-            "Pixmap": ""
+            "Pixmap": command_icon("create_datum_system.svg")
         }
 
     def IsActive(self):
@@ -2240,61 +3647,68 @@ class CreateDatumSystemCommand:
     def Activated(self):
 
         doc = FreeCAD.ActiveDocument
+        datum_objects = sorted(
+            get_datum_feature_objects(doc),
+            key=lambda datum: str(datum.DatumLabel)
+        )
 
-        selection = FreeCADGui.Selection.getSelection()
-
-        if len(selection) < 1 or len(selection) > 3:
-
+        if not datum_objects:
             QtGui.QMessageBox.warning(
                 None,
                 "Datum System",
-                "Select 1 to 3 datum features in precedence order."
+                "Create at least one datum feature before creating a datum system."
             )
-
             return
 
-        datum_objects = []
+        initial_datums = [
+            obj for obj in FreeCADGui.Selection.getSelection()
+            if obj in datum_objects
+        ][:3]
+        compartments = choose_datum_system_compartments(
+            datum_objects,
+            initial_datums
+        )
 
-        for obj in selection:
+        if compartments is None:
+            return
 
-            if not hasattr(obj, "IsSemanticPMI"):
+        primary, secondary, tertiary = compartments
 
-                QtGui.QMessageBox.warning(
-                    None,
-                    "Datum System",
-                    "{} is not semantic PMI.".format(obj.Name)
-                )
-
-                return
-
-            if not hasattr(obj, "DatumLabel"):
-
-                QtGui.QMessageBox.warning(
-                    None,
-                    "Datum System",
-                    "{} is not a datum feature.".format(obj.Name)
-                )
-
-                return
-
-            datum_objects.append(obj)
-
-        labels = [obj.DatumLabel for obj in datum_objects]
-
-        if len(labels) != len(set(labels)):
-
+        if not primary:
             QtGui.QMessageBox.warning(
                 None,
                 "Datum System",
-                "Duplicate datums are not allowed in a datum system."
+                "The primary datum-reference compartment cannot be empty."
             )
-
             return
 
-        name = "MBD_DatumSystem"
+        if tertiary and not secondary:
+            QtGui.QMessageBox.warning(
+                None,
+                "Datum System",
+                "Define a secondary compartment before defining a tertiary compartment."
+            )
+            return
 
-        if len(labels) > 0:
-            name += "_" + "_".join(labels)
+        all_datums = primary + secondary + tertiary
+
+        if len(all_datums) != len(set(datum.Name for datum in all_datums)):
+            QtGui.QMessageBox.warning(
+                None,
+                "Datum System",
+                "A datum feature cannot appear in more than one compartment."
+            )
+            return
+
+        compartment_labels = [
+            datum_compartment_label(datums)
+            for datums in compartments
+            if datums
+        ]
+        name = "MBD_DatumSystem_" + "__".join(
+            label.replace("-", "_")
+            for label in compartment_labels
+        )
 
         ds_obj = doc.addObject(
             "App::FeaturePython",
@@ -2302,15 +3716,11 @@ class CreateDatumSystemCommand:
         )
 
         MBDDatumSystem(ds_obj)
-
-        if len(datum_objects) >= 1:
-            ds_obj.PrimaryDatum = datum_objects[0]
-
-        if len(datum_objects) >= 2:
-            ds_obj.SecondaryDatum = datum_objects[1]
-
-        if len(datum_objects) >= 3:
-            ds_obj.TertiaryDatum = datum_objects[2]
+        add_to_mbd_pmi_group(doc, ds_obj)
+        ds_obj.PrimaryDatums = primary
+        ds_obj.SecondaryDatums = secondary
+        ds_obj.TertiaryDatums = tertiary
+        ds_obj.Label = "MBD_DatumSystem_" + "_".join(compartment_labels)
 
         if FreeCAD.GuiUp:
             ViewProviderMBDDatumSystem(ds_obj.ViewObject)
@@ -2319,7 +3729,7 @@ class CreateDatumSystemCommand:
 
         FreeCAD.Console.PrintMessage(
             "Created datum system: {}\n".format(
-                " | ".join(labels)
+                datum_system_label(ds_obj)
             )
         )
 
@@ -2329,7 +3739,7 @@ class CreateFeatureControlFrameCommand:
         return {
             "MenuText": "Create Feature Control Frame",
             "ToolTip": "Create semantic feature control frame",
-            "Pixmap": ""
+            "Pixmap": command_icon("create_feature_control_frame.svg")
         }
 
     def IsActive(self):
@@ -2341,63 +3751,26 @@ class CreateFeatureControlFrameCommand:
 
         sel = FreeCADGui.Selection.getSelectionEx()
 
-        if len(sel) != 1:
+        tolerance_types = [
+            "Position",
+            "Flatness",
+            "Parallelism",
+            "Perpendicularity",
+            "Angularity",
+            "Straightness",
+            "Circularity",
+            "Cylindricity",
+            "CircularRunout",
+            "TotalRunout",
+            "LineProfile",
+            "Profile"
+        ]
 
-            QtGui.QMessageBox.warning(
-                None,
-                "Feature Control Frame",
-                "Select exactly one controlled feature."
-            )
-
-            return
-
-        selection = sel[0]
-
-        if not selection.SubElementNames:
-
-            QtGui.QMessageBox.warning(
-                None,
-                "Feature Control Frame",
-                "Select a subelement such as a face or edge."
-            )
-
-            return
-
-        controlled_obj = selection.Object
-        controlled_sub = selection.SubElementNames[0]
-
-        datum_systems = get_datum_system_objects(doc)
-
-        if not datum_systems:
-
-            QtGui.QMessageBox.warning(
-                None,
-                "Feature Control Frame",
-                "No datum systems exist."
-            )
-
-            return
-
-        tolerance, ok = QtGui.QInputDialog.getDouble(
+        tolerance_type, ok = QtGui.QInputDialog.getItem(
             None,
-            "Tolerance Value",
-            "Enter tolerance value:",
-            0.1,
-            0.0001,
-            9999,
-            4
-        )
-
-        if not ok:
-            return
-
-        names = [obj.Name for obj in datum_systems]
-
-        ds_name, ok = QtGui.QInputDialog.getItem(
-            None,
-            "Datum System",
-            "Select datum system:",
-            names,
+            "Feature Control Frame",
+            "Select tolerance type:",
+            tolerance_types,
             0,
             False
         )
@@ -2405,19 +3778,288 @@ class CreateFeatureControlFrameCommand:
         if not ok:
             return
 
-        datum_system = doc.getObject(ds_name)
+        tolerance_type = str(tolerance_type)
+        profile_all_over = False
+
+        if tolerance_type == "Profile":
+            reply = QtGui.QMessageBox.question(
+                None,
+                "Profile Scope",
+                "Apply this profile tolerance all over?",
+                QtGui.QMessageBox.Yes | QtGui.QMessageBox.No,
+                QtGui.QMessageBox.No
+            )
+            profile_all_over = reply == QtGui.QMessageBox.Yes
+
+        controlled_obj = None
+        controlled_sub = ""
+
+        if profile_all_over:
+            if len(sel) == 0:
+                controlled_obj = single_body_level_fcf_candidate(doc)
+
+                if controlled_obj is None:
+                    QtGui.QMessageBox.warning(
+                        None,
+                        "Feature Control Frame",
+                        "Select one body, or leave nothing selected only when the document has exactly one body."
+                    )
+                    return
+            elif len(sel) == 1:
+                controlled_obj = sel[0].Object
+
+                if not body_level_fcf_candidate(controlled_obj):
+                    QtGui.QMessageBox.warning(
+                        None,
+                        "Feature Control Frame",
+                        "All-over profile must be attached to a body or solid."
+                    )
+                    return
+            else:
+                QtGui.QMessageBox.warning(
+                    None,
+                    "Feature Control Frame",
+                    "Select one body for all-over profile, or leave nothing selected when there is only one body."
+                )
+                return
+        else:
+            if len(sel) != 1:
+
+                QtGui.QMessageBox.warning(
+                    None,
+                    "Feature Control Frame",
+                    "Select exactly one controlled feature."
+                )
+
+                return
+
+            selection = sel[0]
+
+            if not selection.SubElementNames:
+
+                QtGui.QMessageBox.warning(
+                    None,
+                    "Feature Control Frame",
+                    "Select a subelement such as a face or edge."
+                )
+
+                return
+
+            controlled_obj = selection.Object
+            controlled_sub = selection.SubElementNames[0]
+
+        if (
+            tolerance_type in (
+                "Flatness",
+                "Parallelism",
+                "Perpendicularity",
+                "Angularity",
+                "Circularity",
+                "Cylindricity",
+                "CircularRunout",
+                "TotalRunout",
+                "Profile"
+            )
+            and not profile_all_over
+            and not controlled_sub.startswith("Face")
+        ):
+            QtGui.QMessageBox.warning(
+                None,
+                "Feature Control Frame",
+                "{} must be attached to a face or surface.".format(
+                    tolerance_type
+                )
+            )
+            return
+
+        if (
+            tolerance_type == "LineProfile"
+            and not controlled_sub.startswith("Edge")
+        ):
+            QtGui.QMessageBox.warning(
+                None,
+                "Feature Control Frame",
+                "Line profile must be attached to an edge or curve."
+            )
+            return
+
+        tolerance_text, ok = QtGui.QInputDialog.getText(
+            None,
+            "Tolerance Value",
+            "Enter tolerance value with units:",
+            text="0.005 in"
+        )
+
+        if not ok:
+            return
+
+        try:
+            tolerance = parse_length_quantity_text(tolerance_text)
+        except Exception:
+            QtGui.QMessageBox.warning(
+                None,
+                "Tolerance Value",
+                "Enter a tolerance with units, such as 0.005 in or 0.1 mm."
+            )
+            return
+
+        datum_system = None
+        datum_reference = None
+
+        if tolerance_type == "Position":
+            datum_systems = get_datum_system_objects(doc)
+
+            if not datum_systems:
+                QtGui.QMessageBox.warning(
+                    None,
+                    "Feature Control Frame",
+                    "No datum systems exist."
+                )
+                return
+
+            names = [obj.Name for obj in datum_systems]
+
+            ds_name, ok = QtGui.QInputDialog.getItem(
+                None,
+                "Datum System",
+                "Select datum system:",
+                names,
+                0,
+                False
+            )
+
+            if not ok:
+                return
+
+            datum_system = doc.getObject(ds_name)
+
+        if tolerance_type in ("Profile", "LineProfile"):
+            datum_systems = get_datum_system_objects(doc)
+            names = ["<none>"] + [obj.Name for obj in datum_systems]
+
+            ds_name, ok = QtGui.QInputDialog.getItem(
+                None,
+                "Datum System",
+                "Select datum system:",
+                names,
+                0,
+                False
+            )
+
+            if not ok:
+                return
+
+            if str(ds_name) != "<none>":
+                datum_system = doc.getObject(str(ds_name))
+
+        if tolerance_type in (
+            "Parallelism",
+            "Perpendicularity",
+            "Angularity"
+        ):
+            datum_features = get_datum_feature_objects(doc)
+            datum_systems = get_datum_system_objects(doc)
+            choices = []
+
+            for obj in datum_features:
+                choices.append((
+                    "{} ({})".format(obj.Name, obj.DatumLabel),
+                    obj,
+                    None
+                ))
+
+            for obj in datum_systems:
+                choices.append((
+                    "{} ({})".format(obj.Name, datum_system_label(obj)),
+                    None,
+                    obj
+                ))
+
+            if not choices:
+                QtGui.QMessageBox.warning(
+                    None,
+                    "Feature Control Frame",
+                    "No datum features or datum systems exist."
+                )
+                return
+
+            names = [choice[0] for choice in choices]
+
+            datum_name, ok = QtGui.QInputDialog.getItem(
+                None,
+                "Datum Reference",
+                "Select datum feature or datum system:",
+                names,
+                0,
+                False
+            )
+
+            if not ok:
+                return
+
+            _label, datum_reference, datum_system = choices[
+                names.index(str(datum_name))
+            ]
+
+        if tolerance_type in ("CircularRunout", "TotalRunout"):
+            datum_features = get_datum_feature_objects(doc)
+            datum_systems = get_datum_system_objects(doc)
+
+            choices = []
+
+            for obj in datum_features:
+                choices.append((
+                    "{} ({})".format(obj.Name, obj.DatumLabel),
+                    obj,
+                    None
+                ))
+
+            for obj in datum_systems:
+                choices.append((
+                    "{} ({})".format(obj.Name, datum_system_label(obj)),
+                    None,
+                    obj
+                ))
+
+            if not choices:
+                QtGui.QMessageBox.warning(
+                    None,
+                    "Feature Control Frame",
+                    "No datum features or datum systems exist."
+                )
+                return
+
+            names = [choice[0] for choice in choices]
+
+            datum_name, ok = QtGui.QInputDialog.getItem(
+                None,
+                "Datum Reference",
+                "Select datum feature or datum system:",
+                names,
+                0,
+                False
+            )
+
+            if not ok:
+                return
+
+            _label, datum_reference, datum_system = choices[
+                names.index(str(datum_name))
+            ]
 
         fcf_obj = doc.addObject(
-            "App::FeaturePython",
-            "MBD_FCF_Position"
+            "App::DocumentObjectGroupPython",
+            "MBD_FCF_" + tolerance_type
         )
 
         MBDFeatureControlFrame(fcf_obj)
 
-        fcf_obj.ToleranceType = "Position"
+        fcf_obj.ToleranceType = tolerance_type
         fcf_obj.ToleranceValue = tolerance
-
+        fcf_obj.DiameterZone = tolerance_type == "Position"
+        fcf_obj.ProfileAllOver = profile_all_over
         fcf_obj.DatumSystem = datum_system
+        fcf_obj.DatumReference = datum_reference
 
         fcf_obj.ControlledObject = controlled_obj
         fcf_obj.ControlledSubelement = controlled_sub
@@ -2425,27 +4067,55 @@ class CreateFeatureControlFrameCommand:
         fcf_obj.ReferencedSubelement = controlled_sub
         update_geometry_signature(fcf_obj)
         append_pmi_history(fcf_obj, "fcf-attached")
+        add_to_mbd_pmi_group(doc, fcf_obj)
 
         if FreeCAD.GuiUp:
             ViewProviderMBDFeatureControlFrame(
                 fcf_obj.ViewObject
             )
+            create_fcf_display(doc, fcf_obj)
 
         doc.recompute()
 
         FreeCAD.Console.PrintMessage(
-            "Created position tolerance on {}.{}\n".format(
+            "Created {} tolerance on {}{}\n".format(
+                tolerance_type.lower(),
                 controlled_obj.Name,
-                controlled_sub
+                ".{}".format(controlled_sub) if controlled_sub else ""
             )
         )
+
+
+class CreateGDTSymbolTableCommand:
+
+    def GetResources(self):
+        return {
+            "MenuText": "Create GD&T Symbol Table",
+            "ToolTip": "Create a visible test table for GD&T symbol rendering",
+            "Pixmap": command_icon("create_gdt_symbol_table.svg")
+        }
+
+    def IsActive(self):
+        return True
+
+    def Activated(self):
+        group = create_geometric_tolerance_symbol_table(FreeCAD.ActiveDocument)
+
+        if FreeCAD.GuiUp and group is not None:
+            QtGui.QMessageBox.information(
+                None,
+                "GD&T Symbol Table",
+                "Created GD&T symbol rendering table."
+            )
+
+
 class ExportAP242Command:
 
     def GetResources(self):
         return {
             "MenuText": "Export AP242",
             "ToolTip": "Export AP242 STEP with semantic infrastructure",
-            "Pixmap": ""
+            "Pixmap": command_icon("export_ap242.svg")
         }
 
     def IsActive(self):
@@ -2493,16 +4163,8 @@ if hasattr(FreeCADGui, "addCommand"):
         CreateDatumTargetCommand()
     )
     FreeCADGui.addCommand(
-        "MBD_CreateBasicDimension",
-        CreateBasicDimensionCommand()
-    )
-    FreeCADGui.addCommand(
         "MBD_CreateDimension",
         CreateDimensionCommand()
-    )
-    FreeCADGui.addCommand(
-        "MBD_CreateTargetBasicDimensions",
-        CreateTargetBasicDimensionsCommand()
     )
     FreeCADGui.addCommand(
         "MBD_CreateDatumSystem",
@@ -2511,6 +4173,10 @@ if hasattr(FreeCADGui, "addCommand"):
     FreeCADGui.addCommand(
         "MBD_CreateFeatureControlFrame",
         CreateFeatureControlFrameCommand()
+    )
+    FreeCADGui.addCommand(
+        "MBD_CreateGDTSymbolTable",
+        CreateGDTSymbolTableCommand()
     )
     FreeCADGui.addCommand(
         "MBD_ExportAP242",

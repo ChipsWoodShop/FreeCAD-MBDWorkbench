@@ -13,7 +13,15 @@ DIMENSION_PURPOSES = [
     "Basic",
     "Reference",
     "EqualBilateral",
-    "PlusMinus",
+    "UnequalBilateral",
+    "Limits",
+]
+
+DIMENSION_PURPOSE_CHOICES = [
+    "Basic",
+    "Reference",
+    "EqualBilateral",
+    "UnequalBilateral",
     "Limits",
 ]
 
@@ -515,13 +523,380 @@ def cylindrical_face_reference(obj, subelement=""):
         center = point
 
     axis_point = point + axis * ((center - point).dot(axis))
+    axis_point = cylinder_display_axis_point(obj, shape, axis, axis_point)
+    opening_direction = cylinder_opening_direction(shape, axis, point, axis_point)
 
     return {
         "shape": shape,
         "point": axis_point,
         "direction": axis,
+        "opening_direction": opening_direction,
         "radius": radius,
     }
+
+
+def bound_box_corners(bbox):
+    return [
+        FreeCAD.Vector(x, y, z)
+        for x in [bbox.XMin, bbox.XMax]
+        for y in [bbox.YMin, bbox.YMax]
+        for z in [bbox.ZMin, bbox.ZMax]
+    ]
+
+
+def cylinder_display_axis_point(obj, shape, axis, default_point):
+    opening_choice = cylinder_opening_by_solid_probe(obj, shape, axis, default_point)
+
+    if opening_choice is not None:
+        return opening_choice
+
+    exit_choice = cylinder_exit_axis_point(obj, shape, axis, default_point)
+
+    if exit_choice is not None:
+        return exit_choice
+
+    edge_choice = cylinder_opening_axis_point(obj, shape, axis, default_point)
+
+    if edge_choice is not None:
+        return edge_choice
+
+    candidates = []
+
+    try:
+        for vertex in shape.Vertexes:
+            candidates.append(vertex.Point)
+    except Exception:
+        pass
+
+    if len(candidates) < 2:
+        try:
+            candidates.extend(bound_box_corners(shape.BoundBox))
+        except Exception:
+            pass
+
+    if not candidates:
+        return default_point
+
+    projections = [
+        (point - default_point).dot(axis)
+        for point in candidates
+    ]
+
+    min_projection = min(projections)
+    max_projection = max(projections)
+    end1 = default_point + axis * min_projection
+    end2 = default_point + axis * max_projection
+
+    try:
+        model_center = obj.Shape.CenterOfMass
+    except Exception:
+        return end2
+
+    if (end1 - model_center).Length > (end2 - model_center).Length:
+        return end1
+
+    return end2
+
+
+def cylinder_opening_direction(shape, axis, default_point, opening_point):
+    ends = cylinder_axis_ends(shape, axis, default_point)
+
+    if ends is None:
+        return None
+
+    end1, end2 = ends
+
+    if (opening_point - end1).Length <= (opening_point - end2).Length:
+        direction = end1 - end2
+    else:
+        direction = end2 - end1
+
+    if direction.Length == 0:
+        return None
+
+    direction.normalize()
+    return direction
+
+
+def cylinder_opening_by_solid_probe(obj, shape, axis, default_point):
+    ends = cylinder_axis_ends(shape, axis, default_point)
+
+    if ends is None:
+        return None
+
+    end1, end2 = ends
+    hit1 = distance_to_enter_solid(obj, end1, axis.negative())
+    hit2 = distance_to_enter_solid(obj, end2, axis)
+
+    if hit1 is None and hit2 is None:
+        return None
+
+    if hit1 is None:
+        return end1
+
+    if hit2 is None:
+        return end2
+
+    if abs(hit1 - hit2) <= max(hit1, hit2) * 0.05:
+        return None
+
+    if hit1 > hit2:
+        return end1
+
+    return end2
+
+
+def distance_to_enter_solid(obj, start_point, direction):
+    if direction is None or direction.Length == 0:
+        return None
+
+    try:
+        solid_shape = obj.Shape
+        bbox = solid_shape.BoundBox
+    except Exception:
+        return None
+
+    step = max(
+        min(max(bbox.XLength, bbox.YLength, bbox.ZLength) * 0.01, 1.0),
+        0.025
+    )
+    max_distance = max(bbox.XLength, bbox.YLength, bbox.ZLength) * 2.0 + step
+
+    probe_direction = FreeCAD.Vector(direction)
+    probe_direction.normalize()
+    distance = step
+
+    while distance <= max_distance:
+        point = start_point + probe_direction * distance
+
+        if point_inside_shape(solid_shape, point):
+            return distance
+
+        distance += step
+
+    return None
+
+
+def cylinder_exit_axis_point(obj, shape, axis, default_point):
+    ends = cylinder_axis_ends(shape, axis, default_point)
+
+    if ends is None:
+        return None
+
+    end1, end2 = ends
+    distance1 = distance_to_exit_solid(obj, end1, axis.negative(), shape)
+    distance2 = distance_to_exit_solid(obj, end2, axis, shape)
+
+    if distance1 is None and distance2 is None:
+        return None
+
+    if distance1 is None:
+        return end2
+
+    if distance2 is None:
+        return end1
+
+    if distance1 <= distance2:
+        return end1
+
+    return end2
+
+
+def cylinder_axis_ends(shape, axis, default_point):
+    candidates = []
+
+    try:
+        for vertex in shape.Vertexes:
+            candidates.append(vertex.Point)
+    except Exception:
+        pass
+
+    if len(candidates) < 2:
+        try:
+            candidates.extend(bound_box_corners(shape.BoundBox))
+        except Exception:
+            pass
+
+    if not candidates:
+        return None
+
+    projections = [
+        (point - default_point).dot(axis)
+        for point in candidates
+    ]
+
+    return (
+        default_point + axis * min(projections),
+        default_point + axis * max(projections),
+    )
+
+
+def distance_to_exit_solid(obj, start_point, direction, cylinder_shape):
+    if direction is None or direction.Length == 0:
+        return None
+
+    try:
+        solid_shape = obj.Shape
+        bbox = solid_shape.BoundBox
+    except Exception:
+        return None
+
+    step = max(
+        min(max(bbox.XLength, bbox.YLength, bbox.ZLength) * 0.02, 2.0),
+        0.05
+    )
+    max_distance = max(bbox.XLength, bbox.YLength, bbox.ZLength) * 2.0 + step
+
+    probe_direction = FreeCAD.Vector(direction)
+    probe_direction.normalize()
+
+    # Start slightly away from the exact cylindrical boundary. Boundary
+    # classification is unstable; the first samples intentionally skip the
+    # selected cylinder wall itself and ask about the owning solid volume.
+    distance = step
+
+    while distance <= max_distance:
+        point = start_point + probe_direction * distance
+
+        if not point_inside_shape(solid_shape, point):
+            return distance
+
+        distance += step
+
+    return None
+
+
+def point_inside_shape(shape, point):
+    try:
+        return shape.isInside(point, 1e-5, True)
+    except Exception:
+        try:
+            distance = FreeCAD.Vector(point)
+            return shape.distToShape(Part.Vertex(distance))[0] <= 1e-5
+        except Exception:
+            return False
+
+
+def cylinder_opening_axis_point(obj, cylinder_face, axis, default_point):
+    end_edges = cylinder_end_edges(cylinder_face, axis, default_point)
+
+    if len(end_edges) < 2:
+        return None
+
+    scored = []
+
+    for edge_data in end_edges:
+        area = adjacent_non_cylindrical_face_area(obj, cylinder_face, edge_data["edge"])
+        scored.append((area, edge_data))
+
+    scored = [item for item in scored if item[0] is not None]
+
+    if len(scored) < 2:
+        return None
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return scored[0][1]["point"]
+
+
+def cylinder_end_edges(cylinder_face, axis, default_point):
+    edge_data = []
+
+    try:
+        edges = list(cylinder_face.Edges)
+    except Exception:
+        return edge_data
+
+    for edge in edges:
+        try:
+            point = edge.CenterOfMass
+        except Exception:
+            continue
+
+        projection = (point - default_point).dot(axis)
+        edge_data.append({
+            "edge": edge,
+            "point": default_point + axis * projection,
+            "projection": projection,
+        })
+
+    if len(edge_data) <= 2:
+        return edge_data
+
+    edge_data.sort(key=lambda item: item["projection"])
+    return [edge_data[0], edge_data[-1]]
+
+
+def adjacent_non_cylindrical_face_area(obj, cylinder_face, edge):
+    best_area = None
+
+    try:
+        faces = list(obj.Shape.Faces)
+    except Exception:
+        return None
+
+    for face in faces:
+        if same_shape(face, cylinder_face):
+            continue
+
+        try:
+            surface_name = face.Surface.__class__.__name__.lower()
+        except Exception:
+            surface_name = ""
+
+        if "cylinder" in surface_name:
+            continue
+
+        if not face_contains_edge(face, edge):
+            continue
+
+        try:
+            area = float(face.Area)
+        except Exception:
+            continue
+
+        if best_area is None or area > best_area:
+            best_area = area
+
+    return best_area
+
+
+def same_shape(shape1, shape2):
+    try:
+        return shape1.isSame(shape2)
+    except Exception:
+        return False
+
+
+def face_contains_edge(face, target_edge, tolerance=1e-5):
+    try:
+        target_length = float(target_edge.Length)
+    except Exception:
+        target_length = None
+
+    try:
+        edges = list(face.Edges)
+    except Exception:
+        return False
+
+    for edge in edges:
+        try:
+            distance = edge.distToShape(target_edge)[0]
+        except Exception:
+            continue
+
+        if distance > tolerance:
+            continue
+
+        if target_length is not None:
+            try:
+                if abs(float(edge.Length) - target_length) > tolerance:
+                    continue
+            except Exception:
+                pass
+
+        return True
+
+    return False
 
 
 def line_reference(obj, subelement=""):
@@ -599,7 +974,22 @@ def cylinder_size_measurement(dimension_kind, cylinder):
         pattern = "CylinderRadius"
 
     axis = cylinder["direction"]
-    helper = axis.cross(FreeCAD.Vector(0, 0, 1))
+    axis_point = cylinder["point"]
+    helper = None
+
+    try:
+        center_of_mass = cylinder["shape"].CenterOfMass
+        radial = center_of_mass - axis_point
+        radial = radial - axis * radial.dot(axis)
+
+        if radial.Length > cylinder["radius"] * 0.1:
+            radial.normalize()
+            helper = radial
+    except Exception:
+        helper = None
+
+    if helper is None:
+        helper = axis.cross(FreeCAD.Vector(0, 0, 1))
 
     if helper.Length == 0:
         helper = axis.cross(FreeCAD.Vector(0, 1, 0))
@@ -608,14 +998,17 @@ def cylinder_size_measurement(dimension_kind, cylinder):
         return empty_measurement("Could not resolve a radius direction.")
 
     helper.normalize()
-    p1 = cylinder["point"] - helper * cylinder["radius"]
-    p2 = cylinder["point"] + helper * cylinder["radius"]
+    p1 = axis_point - helper * cylinder["radius"]
+    p2 = axis_point + helper * cylinder["radius"]
 
     if dimension_kind == "Radius":
-        p1 = cylinder["point"]
-        p2 = cylinder["point"] + helper * cylinder["radius"]
+        p1 = axis_point
+        p2 = axis_point + helper * cylinder["radius"]
 
-    return good_measurement(value, p1, p2, pattern)
+    result = good_measurement(value, p1, p2, pattern)
+    result["text_normal"] = axis
+
+    return result
 
 
 def axis_to_plane_measurement(axis, plane):
@@ -626,14 +1019,18 @@ def axis_to_plane_measurement(axis, plane):
 
     signed = signed_distance_to_plane(axis["point"], plane)
     projected = axis["point"] - (plane["normal"] * signed)
-    return good_measurement(abs(signed), projected, axis["point"], "AxisToPlane")
+    result = good_measurement(abs(signed), projected, axis["point"], "AxisToPlane")
+    result["display_direction"] = axis.get("opening_direction")
+    return result
 
 
 def axis_to_point_measurement(axis, point):
     delta = point - axis["point"]
     along_axis = axis["direction"] * delta.dot(axis["direction"])
     axis_point = axis["point"] + along_axis
-    return good_measurement((point - axis_point).Length, axis_point, point, "AxisToPoint")
+    result = good_measurement((point - axis_point).Length, axis_point, point, "AxisToPoint")
+    result["display_direction"] = axis.get("opening_direction")
+    return result
 
 
 def axis_to_axis_measurement(axis1, axis2):
@@ -713,12 +1110,14 @@ def measurement_from_references(
         if result["value"] is None:
             return result
 
-        return good_measurement(
+        flipped = good_measurement(
             result["value"],
             result["point2"],
             result["point1"],
             "AxisToPlane"
         )
+        flipped["display_direction"] = result.get("display_direction")
+        return flipped
 
     if plane1 is not None and axis2 is not None:
         return axis_to_plane_measurement(axis2, plane1)
@@ -753,12 +1152,14 @@ def measurement_from_references(
 
     if axis2 is not None and point1 is not None:
         result = axis_to_point_measurement(axis2, point1)
-        return good_measurement(
+        flipped = good_measurement(
             result["value"],
             result["point2"],
             result["point1"],
             "PointToAxis"
         )
+        flipped["display_direction"] = result.get("display_direction")
+        return flipped
 
     if plane1 is not None and point2 is not None:
         return plane_to_point_measurement(plane1, point2)
@@ -819,16 +1220,21 @@ def update_dimension_signature(obj):
 
 def dimension_display_label(obj):
     purpose = str(obj.DimensionPurpose)
+    prefix = ""
+
+    if str(getattr(obj, "DimensionKind", "")) == "Radius":
+        prefix = "R "
 
     if purpose == "Reference":
-        return "({})".format(
+        return "({}{})".format(
+            prefix,
             FreeCAD.Units.Quantity(
                 obj.NominalValue,
                 FreeCAD.Units.Length
             ).UserString
         )
 
-    if purpose == "PlusMinus":
+    if purpose == "UnequalBilateral":
         nominal = FreeCAD.Units.Quantity(
             obj.NominalValue,
             FreeCAD.Units.Length
@@ -841,7 +1247,7 @@ def dimension_display_label(obj):
             abs(obj.LowerTolerance),
             FreeCAD.Units.Length
         ).UserString
-        return "{} +{} -{}".format(nominal, upper, lower)
+        return "{}{} +{} -{}".format(prefix, nominal, upper, lower)
 
     if purpose == "EqualBilateral":
         nominal = FreeCAD.Units.Quantity(
@@ -852,7 +1258,7 @@ def dimension_display_label(obj):
             obj.UpperTolerance,
             FreeCAD.Units.Length
         ).UserString
-        return "{} +/- {}".format(nominal, tolerance)
+        return "{}{} +/- {}".format(prefix, nominal, tolerance)
 
     if purpose == "Limits":
         lower = FreeCAD.Units.Quantity(
@@ -863,9 +1269,9 @@ def dimension_display_label(obj):
             obj.UpperLimit,
             FreeCAD.Units.Length
         ).UserString
-        return "{} / {}".format(lower, upper)
+        return "{}{} / {}{}".format(prefix, lower, prefix, upper)
 
-    return FreeCAD.Units.Quantity(
+    return prefix + FreeCAD.Units.Quantity(
         obj.NominalValue,
         FreeCAD.Units.Length
     ).UserString

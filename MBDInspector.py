@@ -158,7 +158,9 @@ class MBDInspectorWidget(QtGui.QWidget):
                 obj.Name,
                 getattr(obj, "PMIId", ""),
                 MBDValidation.attachment_text(obj),
-                getattr(obj, "GeometryType", ""),
+                MBDValidation.fcf_geometry_text(obj)
+                    if MBDValidation.is_mbd_fcf(obj)
+                    else getattr(obj, "GeometryType", ""),
                 message,
             ]
 
@@ -200,6 +202,8 @@ class MBDInspectorWidget(QtGui.QWidget):
         return "\n".join(lines)
 
     def copy_report(self):
+        self.refresh()
+
         clipboard = QtGui.QApplication.clipboard()
         clipboard.setText(self.report_text())
 
@@ -233,6 +237,7 @@ class MBDInspectorWidget(QtGui.QWidget):
             return
 
         obj = self.rows[row]["object"]
+        FreeCADGui.Selection.addSelection(obj)
 
         target_obj = None
         subelement = ""
@@ -245,7 +250,6 @@ class MBDInspectorWidget(QtGui.QWidget):
             subelement = obj.ReferencedSubelement
 
         if target_obj is None:
-            FreeCADGui.Selection.addSelection(obj)
             return
 
         try:
@@ -279,5 +283,10 @@ def show_inspector():
             QtCore.Qt.RightDockWidgetArea,
             dock_widget
         )
+    else:
+        inspector = dock_widget.widget()
+
+        if inspector is not None and hasattr(inspector, "refresh"):
+            inspector.refresh()
 
     dock_widget.show()

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect width="64" height="64" rx="10" fill="#f8fff6"/>
+  <rect x="8" y="22" width="38" height="18" fill="#fff" stroke="#1f2933" stroke-width="4"/>
+  <path d="M20 18 V44 M14 31 H26" stroke="#1f2933" stroke-width="3" stroke-linecap="round"/>
+  <text x="33" y="35" text-anchor="middle" font-family="Arial, sans-serif" font-weight="700" font-size="12" fill="#1f2933">PMI</text>
+  <path d="M28 45 L39 55 L58 31" fill="none" stroke="#2ca02c" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

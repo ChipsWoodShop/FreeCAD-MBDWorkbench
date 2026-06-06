@@ -68,6 +68,27 @@ class MBDDatumFeature:
             "MBD",
             "Optional visible datum label text helper"
         )
+
+        obj.addProperty(
+            "App::PropertyLink",
+            "DisplayFrame",
+            "MBD",
+            "Optional visible datum label frame helper"
+        )
+
+        obj.addProperty(
+            "App::PropertyLink",
+            "DisplayMarker",
+            "MBD",
+            "Optional visible datum triangle marker helper"
+        )
+
+        obj.addProperty(
+            "App::PropertyLink",
+            "DisplayLeader",
+            "MBD",
+            "Optional visible datum leader helper"
+        )
         
         obj.addProperty(
             "App::PropertyVector",

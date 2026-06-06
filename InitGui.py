@@ -17,9 +17,9 @@ class MBDWorkbench(FreeCADGui.Workbench):
             "MBD_ShowPMIInspector",
             "MBD_CreateDatumTarget",
             "MBD_CreateDimension",
-            "MBD_CreateTargetBasicDimensions",
             "MBD_CreateDatumSystem",
             "MBD_CreateFeatureControlFrame",
+            "MBD_CreateGDTSymbolTable",
             "MBD_ExportAP242",
         ])
 
@@ -29,14 +29,24 @@ class MBDWorkbench(FreeCADGui.Workbench):
             "MBD_ShowPMIInspector",
             "MBD_CreateDatumTarget",
             "MBD_CreateDimension",
-            "MBD_CreateTargetBasicDimensions",
             "MBD_CreateDatumSystem",
             "MBD_CreateFeatureControlFrame",
+            "MBD_CreateGDTSymbolTable",
             "MBD_ExportAP242",
         ])
 
     def Activated(self):
         FreeCAD.Console.PrintMessage("MBD Workbench activated\n")
+
+        try:
+            import MBDCommands
+
+            if FreeCAD.ActiveDocument is not None:
+                MBDCommands.organize_pmi_tree(FreeCAD.ActiveDocument)
+        except Exception as e:
+            FreeCAD.Console.PrintWarning(
+                "Could not organize MBD PMI tree: {}\n".format(e)
+            )
 
     def Deactivated(self):
         pass
