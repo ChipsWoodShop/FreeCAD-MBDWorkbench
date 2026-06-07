@@ -17,9 +17,17 @@ import MBDDimension
 import MBDDatumTarget
 import MBDValidation
 from MBDDatum import MBDDatumFeature, update_geometry_signature
-from MBDDatumSystem import MBDDatumSystem, datum_system_label
+from MBDDatumSystem import (
+    MBDDatumSystem,
+    datum_system_label,
+    datum_system_object_label,
+    synchronize_datum_system_label,
+)
 from MBDFeatureControlFrame import MBDFeatureControlFrame
-from MBDPMI import update_pmi_display_layout
+from MBDPMI import (
+    migrate_semantic_pmi_global_links,
+    update_pmi_display_layout,
+)
 
 
 class AcceptMessageBox:
@@ -478,6 +486,25 @@ def common_datum_system_validation_smoke():
     datum_system.SecondaryDatums = [datum_c]
     datum_system.TertiaryDatums = []
 
+    if datum_system_object_label(datum_system) != "MBD_DatumSystem_A-B_C":
+        raise AssertionError(
+            "unexpected datum system object label {}".format(
+                datum_system_object_label(datum_system)
+            )
+        )
+
+    datum_system.Label = datum_system.Name
+
+    if not synchronize_datum_system_label(datum_system):
+        raise AssertionError("sanitized datum system label was not synchronized")
+
+    if datum_system.Label != "MBD_DatumSystem_A-B_C":
+        raise AssertionError(
+            "synchronized datum system label was {}".format(
+                datum_system.Label
+            )
+        )
+
     if datum_system_label(datum_system) != "A-B | C":
         raise AssertionError(
             "unexpected common datum label {}".format(
@@ -650,6 +677,128 @@ def display_layout_metadata_smoke():
     FreeCAD.closeDocument(reopened.Name)
     os.remove(output_path)
     print("display layout metadata passed")
+
+
+def global_geometry_link_scope_smoke():
+    output_path = "/tmp/mbd_global_geometry_links.FCStd"
+
+    if os.path.exists(output_path):
+        os.remove(output_path)
+
+    doc = FreeCAD.newDocument("MBDGlobalGeometryLinkScopeSmoke")
+    body = doc.addObject("PartDesign::Body", "Body")
+    feature = body.newObject("PartDesign::Feature", "BodyFeature")
+    feature.Shape = Part.makeBox(10, 20, 30)
+    doc.recompute()
+
+    datum = doc.addObject("App::FeaturePython", "MBD_DatumFeature_A")
+    MBDDatumFeature(datum)
+    datum.ReferencedObject = feature
+    datum.ReferencedSubelement = "Face1"
+
+    target = doc.addObject("App::FeaturePython", "MBD_DatumTarget_A1")
+    MBDDatumTarget.MBDDatumTarget(target)
+    target.ParentDatum = datum
+    target.ConstructionObject = feature
+    target.ReferencedObject = feature
+    target.ReferencedSubelement = "Face1"
+
+    dimension = doc.addObject(
+        "App::DocumentObjectGroupPython",
+        "MBD_Dimension_GlobalLinks"
+    )
+    MBDDimension.MBDDimension(dimension)
+    dimension.ReferenceObject1 = feature
+    dimension.ReferenceSubelement1 = "Face1"
+    dimension.ReferenceObject2 = feature
+    dimension.ReferenceSubelement2 = "Face2"
+
+    fcf = doc.addObject(
+        "App::DocumentObjectGroupPython",
+        "MBD_FCF_GlobalLinks"
+    )
+    MBDFeatureControlFrame(fcf)
+    fcf.ControlledObject = feature
+    fcf.ControlledSubelement = "Face1"
+    fcf.ReferencedObject = feature
+    fcf.ReferencedSubelement = "Face1"
+
+    expected_global_links = {
+        datum: ["ReferencedObject"],
+        target: ["ConstructionObject", "ReferencedObject"],
+        dimension: ["ReferenceObject1", "ReferenceObject2"],
+        fcf: ["ControlledObject", "ReferencedObject"],
+    }
+
+    for obj, property_names in expected_global_links.items():
+        for property_name in property_names:
+            property_type = obj.getTypeIdOfProperty(property_name)
+
+            if property_type != "App::PropertyLinkGlobal":
+                raise AssertionError(
+                    "{}.{} uses {}".format(
+                        obj.Name,
+                        property_name,
+                        property_type
+                    )
+                )
+
+            if getattr(obj, property_name) is not feature:
+                raise AssertionError(
+                    "{}.{} did not retain the body feature link".format(
+                        obj.Name,
+                        property_name
+                    )
+                )
+
+    if target.getTypeIdOfProperty("ParentDatum") != "App::PropertyLink":
+        raise AssertionError("PMI-to-PMI parent datum link should remain local")
+
+    if fcf.getTypeIdOfProperty("DisplayFrame") != "App::PropertyLink":
+        raise AssertionError("display helper link should remain local")
+
+    legacy = doc.addObject("App::FeaturePython", "MBD_LegacyGeometryLink")
+    legacy.addProperty("App::PropertyBool", "IsSemanticPMI", "MBD")
+    legacy.IsSemanticPMI = True
+    legacy.addProperty("App::PropertyLink", "ReferencedObject", "MBD")
+    legacy.ReferencedObject = feature
+
+    migrated = migrate_semantic_pmi_global_links(doc)
+
+    if "MBD_LegacyGeometryLink.ReferencedObject" not in migrated:
+        raise AssertionError("legacy geometry link was not reported as migrated")
+
+    if (
+        legacy.getTypeIdOfProperty("ReferencedObject")
+        != "App::PropertyLinkGlobal"
+    ):
+        raise AssertionError("legacy geometry link type was not migrated")
+
+    if legacy.ReferencedObject is not feature:
+        raise AssertionError("legacy geometry link target was not preserved")
+
+    datum_name = datum.Name
+    feature_name = feature.Name
+    doc.recompute()
+    doc.saveAs(output_path)
+    FreeCAD.closeDocument(doc.Name)
+
+    reopened = FreeCAD.openDocument(output_path)
+    reopened_datum = reopened.getObject(datum_name)
+    reopened_feature = reopened.getObject(feature_name)
+
+    if (
+        reopened_datum.getTypeIdOfProperty("ReferencedObject")
+        != "App::PropertyLinkGlobal"
+    ):
+        raise AssertionError("global geometry link type did not survive save/reopen")
+
+    if reopened_datum.ReferencedObject is not reopened_feature:
+        raise AssertionError("global geometry link target did not survive save/reopen")
+
+    FreeCAD.closeDocument(reopened.Name)
+    os.remove(output_path)
+    print("global geometry link scope passed")
 
 
 def common_datum_export_smoke(output_path):
@@ -2017,6 +2166,7 @@ def main():
             "common-datum-system-validation",
             "common-datum-export",
             "display-layout-metadata",
+            "global-geometry-link-scope",
             "fcf-rule-validation",
             "dimension-reference-patterns",
             "basic-size-dimension-requires-profile",
@@ -2069,6 +2219,8 @@ def main():
         common_datum_export_smoke(args.output)
     elif args.mode == "display-layout-metadata":
         display_layout_metadata_smoke()
+    elif args.mode == "global-geometry-link-scope":
+        global_geometry_link_scope_smoke()
     elif args.mode == "fcf-rule-validation":
         fcf_rule_validation_smoke()
     elif args.mode == "dimension-reference-patterns":

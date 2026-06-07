@@ -266,6 +266,7 @@ Keep or add tests for:
 | Datum target sufficiency validation | Done | Headless regression confirms underdefined primary and secondary point-target datum sets are reported and complete 3/2 target sets clear validation. |
 | Stable semantic PMI display-layout metadata | Done | Headless regression confirms all semantic PMI types receive the layout schema, locked layouts reject automatic overwrite, and values survive FCStd save/reopen. |
 | Dimension purpose and reference semantic rules | Done | Headless regression rejects unequal values marked equal bilateral, tolerance values on basic/reference dimensions, and diameter/radius dimensions with a second reference. |
+| Global-scope links to Part Design geometry | Done | Model and construction geometry references use `App::PropertyLinkGlobal`; headless regression covers new datum, target, dimension, and FCF links, legacy-link migration, local PMI/display links, and FCStd save/reopen. |
 
 ## GUI Test Punch List
 
@@ -276,6 +277,8 @@ tests are completed.
 | --- | --- | --- |
 | `Show PMI Inspector` then `Copy Report` | Passed | Confirms the debugging handoff path still works. |
 | MBD toolbar command icons | Passed | Restart FreeCAD and confirm all nine SVG icons render crisply, remain distinguishable at toolbar size, and have acceptable contrast with the current FreeCAD theme. |
+| Part Design link-scope warning cleanup | Passed | Restart FreeCAD, activate MBD, and confirm the report view says existing MBD geometry links were updated to global scope. Create a datum, datum target, dimension, and FCF on Body features; the transient `go out of the allowed scope` warnings should no longer appear. Save and reopen the document to confirm links remain intact. |
+| Readable datum-system names in FCF dialogs | Passed | Restart FreeCAD and open each FCF datum-system picker. Confirm common and compartment notation matches the model-tree label, for example `MBD_DatumSystem_A-B_C`, rather than the sanitized internal name `MBD_DatumSystem_A_B__C`. |
 | `Show PMI Inspector` then `Select Suspect` | Passed | Confirms warning/error rows can drive selection/highlighting. |
 | `Validate PMI` command | Passed | Confirms the non-docked validation path still reports useful results. |
 | `Create GD&T Symbol Table` | Passed | Confirms drawn GD&T symbols render in the current FreeCAD session. |

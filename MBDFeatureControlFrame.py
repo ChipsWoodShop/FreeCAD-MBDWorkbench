@@ -2,7 +2,7 @@
 
 import FreeCAD
 
-from MBDPMI import ensure_pmi_identity
+from MBDPMI import ensure_global_link_property, ensure_pmi_identity
 
 
 class MBDFeatureControlFrame:
@@ -74,8 +74,8 @@ class MBDFeatureControlFrame:
             "Single referenced datum feature"
         )
 
-        obj.addProperty(
-            "App::PropertyLink",
+        ensure_global_link_property(
+            obj,
             "ControlledObject",
             "MBD_FCF",
             "Controlled geometry object"
@@ -88,8 +88,8 @@ class MBDFeatureControlFrame:
             "Controlled subelement"
         )
         
-        obj.addProperty(
-            "App::PropertyLink",
+        ensure_global_link_property(
+            obj,
             "ReferencedObject",
             "MBD",
             "Object used for generic PMI geometry validation"

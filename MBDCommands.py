@@ -49,6 +49,8 @@ from MBDDatumSystem import (
     datum_compartment_label,
     datum_system_compartments,
     datum_system_label,
+    datum_system_object_label,
+    synchronize_datum_system_label,
     is_datum_system_object
 )
 from MBDFeatureControlFrame import (
@@ -176,6 +178,9 @@ def organize_pmi_tree(doc):
 
         if not is_semantic_pmi_object(obj):
             continue
+
+        if is_datum_system_object(obj):
+            synchronize_datum_system_label(obj)
 
         add_to_mbd_pmi_group(doc, obj)
 
@@ -3705,14 +3710,11 @@ class CreateDatumSystemCommand:
             for datums in compartments
             if datums
         ]
-        name = "MBD_DatumSystem_" + "__".join(
-            label.replace("-", "_")
-            for label in compartment_labels
-        )
+        requested_name = "MBD_DatumSystem_" + "_".join(compartment_labels)
 
         ds_obj = doc.addObject(
             "App::FeaturePython",
-            name
+            requested_name
         )
 
         MBDDatumSystem(ds_obj)
@@ -3720,7 +3722,7 @@ class CreateDatumSystemCommand:
         ds_obj.PrimaryDatums = primary
         ds_obj.SecondaryDatums = secondary
         ds_obj.TertiaryDatums = tertiary
-        ds_obj.Label = "MBD_DatumSystem_" + "_".join(compartment_labels)
+        ds_obj.Label = datum_system_object_label(ds_obj)
 
         if FreeCAD.GuiUp:
             ViewProviderMBDDatumSystem(ds_obj.ViewObject)
@@ -3917,7 +3919,7 @@ class CreateFeatureControlFrameCommand:
                 )
                 return
 
-            names = [obj.Name for obj in datum_systems]
+            names = [obj.Label for obj in datum_systems]
 
             ds_name, ok = QtGui.QInputDialog.getItem(
                 None,
@@ -3931,11 +3933,11 @@ class CreateFeatureControlFrameCommand:
             if not ok:
                 return
 
-            datum_system = doc.getObject(ds_name)
+            datum_system = datum_systems[names.index(str(ds_name))]
 
         if tolerance_type in ("Profile", "LineProfile"):
             datum_systems = get_datum_system_objects(doc)
-            names = ["<none>"] + [obj.Name for obj in datum_systems]
+            names = ["<none>"] + [obj.Label for obj in datum_systems]
 
             ds_name, ok = QtGui.QInputDialog.getItem(
                 None,
@@ -3950,7 +3952,9 @@ class CreateFeatureControlFrameCommand:
                 return
 
             if str(ds_name) != "<none>":
-                datum_system = doc.getObject(str(ds_name))
+                datum_system = datum_systems[
+                    names.index(str(ds_name)) - 1
+                ]
 
         if tolerance_type in (
             "Parallelism",
@@ -3970,7 +3974,7 @@ class CreateFeatureControlFrameCommand:
 
             for obj in datum_systems:
                 choices.append((
-                    "{} ({})".format(obj.Name, datum_system_label(obj)),
+                    obj.Label,
                     None,
                     obj
                 ))
@@ -4016,7 +4020,7 @@ class CreateFeatureControlFrameCommand:
 
             for obj in datum_systems:
                 choices.append((
-                    "{} ({})".format(obj.Name, datum_system_label(obj)),
+                    obj.Label,
                     None,
                     obj
                 ))

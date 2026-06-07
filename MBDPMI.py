@@ -4,6 +4,15 @@ import json
 import uuid
 
 
+GLOBAL_GEOMETRY_LINK_PROPERTIES = {
+    "ReferencedObject",
+    "ControlledObject",
+    "ConstructionObject",
+    "ReferenceObject1",
+    "ReferenceObject2",
+}
+
+
 def _add_property_if_missing(obj, prop_type, name, group, description):
     if hasattr(obj, name):
         return False
@@ -15,6 +24,85 @@ def _add_property_if_missing(obj, prop_type, name, group, description):
         description
     )
     return True
+
+
+def ensure_global_link_property(obj, name, group, description):
+    if not hasattr(obj, name):
+        obj.addProperty(
+            "App::PropertyLinkGlobal",
+            name,
+            group,
+            description
+        )
+        return True
+
+    try:
+        property_type = obj.getTypeIdOfProperty(name)
+    except Exception:
+        return False
+
+    if property_type == "App::PropertyLinkGlobal":
+        return False
+
+    if property_type != "App::PropertyLink":
+        return False
+
+    linked_object = getattr(obj, name, None)
+
+    try:
+        property_group = obj.getGroupOfProperty(name) or group
+    except Exception:
+        property_group = group
+
+    try:
+        property_description = obj.getDocumentationOfProperty(name) or description
+    except Exception:
+        property_description = description
+
+    obj.removeProperty(name)
+    obj.addProperty(
+        "App::PropertyLinkGlobal",
+        name,
+        property_group,
+        property_description
+    )
+    setattr(obj, name, linked_object)
+    return True
+
+
+def migrate_semantic_pmi_global_links(doc):
+    migrated = []
+
+    if doc is None:
+        return migrated
+
+    for obj in doc.Objects:
+        if not getattr(obj, "IsSemanticPMI", False):
+            continue
+
+        for name in GLOBAL_GEOMETRY_LINK_PROPERTIES:
+            if not hasattr(obj, name):
+                continue
+
+            try:
+                group = obj.getGroupOfProperty(name)
+            except Exception:
+                group = "MBD"
+
+            try:
+                description = obj.getDocumentationOfProperty(name)
+            except Exception:
+                description = "Referenced model geometry"
+
+            if ensure_global_link_property(
+                obj,
+                name,
+                group or "MBD",
+                description or "Referenced model geometry"
+            ):
+                migrated.append("{}.{}".format(obj.Name, name))
+
+    return migrated
 
 
 def ensure_pmi_display_layout(obj):

@@ -6,7 +6,7 @@ import FreeCAD
 import Part
 
 import MBDBasicDimension
-from MBDPMI import ensure_pmi_identity
+from MBDPMI import ensure_global_link_property, ensure_pmi_identity
 
 
 DIMENSION_PURPOSES = [
@@ -147,9 +147,8 @@ class MBDDimension:
         )
         obj.ValidationTolerance = 0.001
 
-        add_property_if_missing(
+        ensure_global_link_property(
             obj,
-            "App::PropertyLink",
             "ReferenceObject1",
             "MBD_Dimension",
             "First reference object"
@@ -163,9 +162,8 @@ class MBDDimension:
             "First reference subelement"
         )
 
-        add_property_if_missing(
+        ensure_global_link_property(
             obj,
-            "App::PropertyLink",
             "ReferenceObject2",
             "MBD_Dimension",
             "Second reference object"

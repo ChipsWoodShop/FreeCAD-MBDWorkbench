@@ -41,6 +41,32 @@ def datum_system_label(obj):
     return " | ".join(label for label in labels if label)
 
 
+def datum_system_object_label(obj):
+    compartments = [
+        datum_compartment_label(datums)
+        for _role_name, datums in datum_system_compartments(obj)
+    ]
+    suffix = "_".join(label for label in compartments if label)
+
+    if not suffix:
+        return "MBD_DatumSystem"
+
+    return "MBD_DatumSystem_" + suffix
+
+
+def synchronize_datum_system_label(obj):
+    if not is_datum_system_object(obj):
+        return False
+
+    expected = datum_system_object_label(obj)
+
+    if obj.Label == expected:
+        return False
+
+    obj.Label = expected
+    return True
+
+
 def datum_system_datums(obj):
     datums = []
 

@@ -5,7 +5,7 @@ import json
 import FreeCAD
 import Part
 
-from MBDPMI import ensure_pmi_identity
+from MBDPMI import ensure_global_link_property, ensure_pmi_identity
 
 
 def add_property_if_missing(obj, prop_type, name, group, description):
@@ -50,9 +50,8 @@ class MBDDatumTarget:
             "Semantic datum feature established by this target"
         )
 
-        add_property_if_missing(
+        ensure_global_link_property(
             obj,
-            "App::PropertyLink",
             "ConstructionObject",
             "MBD_Target",
             "FreeCAD construction object defining the nominal target"
@@ -66,9 +65,8 @@ class MBDDatumTarget:
             "Optional selected subelement of the construction object"
         )
 
-        add_property_if_missing(
+        ensure_global_link_property(
             obj,
-            "App::PropertyLink",
             "ReferencedObject",
             "MBD",
             "Object containing the inspected datum surface"

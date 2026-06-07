@@ -76,6 +76,7 @@ def main():
             "common-datum-system-validation",
             "common-datum-export",
             "display-layout-metadata",
+            "global-geometry-link-scope",
             "fcf-rule-validation",
             "dimension-reference-patterns",
             "basic-size-dimension-requires-profile",

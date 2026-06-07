@@ -40,8 +40,20 @@ class MBDWorkbench(FreeCADGui.Workbench):
 
         try:
             import MBDCommands
+            from MBDPMI import migrate_semantic_pmi_global_links
 
             if FreeCAD.ActiveDocument is not None:
+                migrated = migrate_semantic_pmi_global_links(
+                    FreeCAD.ActiveDocument
+                )
+
+                if migrated:
+                    FreeCAD.Console.PrintMessage(
+                        "Updated {} MBD geometry links to global scope.\n".format(
+                            len(migrated)
+                        )
+                    )
+
                 MBDCommands.organize_pmi_tree(FreeCAD.ActiveDocument)
         except Exception as e:
             FreeCAD.Console.PrintWarning(

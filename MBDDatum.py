@@ -3,7 +3,7 @@
 import FreeCAD
 import json
 
-from MBDPMI import ensure_pmi_identity
+from MBDPMI import ensure_global_link_property, ensure_pmi_identity
 
 class MBDDatumFeature:
     """
@@ -24,8 +24,8 @@ class MBDDatumFeature:
         )
         obj.DatumLabel = "A"
 
-        obj.addProperty(
-            "App::PropertyLink",
+        ensure_global_link_property(
+            obj,
             "ReferencedObject",
             "MBD",
             "FreeCAD object containing the referenced geometry"
