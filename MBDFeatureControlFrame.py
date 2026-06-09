@@ -3,6 +3,7 @@
 import FreeCAD
 
 from MBDPMI import ensure_global_link_property, ensure_pmi_identity
+from MBDViewProvider import ViewProviderSingleItemFCF
 
 
 class MBDFeatureControlFrame:
@@ -192,7 +193,5 @@ class MBDFeatureControlFrame:
         pass
 
 
-class ViewProviderMBDFeatureControlFrame:
-
-    def __init__(self, vobj):
-        vobj.Proxy = self
+class ViewProviderMBDFeatureControlFrame(ViewProviderSingleItemFCF):
+    pass

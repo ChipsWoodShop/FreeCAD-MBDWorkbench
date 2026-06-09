@@ -365,6 +365,28 @@ def shape_element(obj, subelement=""):
         return None
 
 
+def nearest_point_on_shape(obj, point):
+    if obj is None or point is None:
+        return None
+
+    try:
+        shape = obj.Shape
+
+        if shape.isNull():
+            return None
+
+        distance, point_pairs, _support = Part.Vertex(
+            FreeCAD.Vector(point)
+        ).distToShape(shape)
+
+        if distance < 0 or not point_pairs:
+            return None
+
+        return FreeCAD.Vector(point_pairs[0][1])
+    except Exception:
+        return None
+
+
 def vector_is_parallel(v1, v2, tolerance=1e-6):
     if v1 is None or v2 is None:
         return False

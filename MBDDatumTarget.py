@@ -6,6 +6,7 @@ import FreeCAD
 import Part
 
 from MBDPMI import ensure_global_link_property, ensure_pmi_identity
+from MBDViewProvider import ViewProviderSingleItemDatumTarget
 
 
 def add_property_if_missing(obj, prop_type, name, group, description):
@@ -154,31 +155,8 @@ class MBDDatumTarget:
         pass
 
 
-class ViewProviderMBDDatumTarget:
-
-    def __init__(self, vobj):
-        vobj.Proxy = self
-
-    def getIcon(self):
-        return ""
-
-    def attach(self, vobj):
-        pass
-
-    def updateData(self, obj, prop):
-        pass
-
-    def onChanged(self, vobj, prop):
-        pass
-
-    def getDisplayModes(self, obj):
-        return []
-
-    def getDefaultDisplayMode(self):
-        return "Flat Lines"
-
-    def setDisplayMode(self, mode):
-        return mode
+class ViewProviderMBDDatumTarget(ViewProviderSingleItemDatumTarget):
+    pass
 
 
 def get_point_from_target(obj):

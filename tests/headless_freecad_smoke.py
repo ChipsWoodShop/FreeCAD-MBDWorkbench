@@ -10,6 +10,8 @@ sys.path.insert(0, WORKBENCH_DIR)
 
 import FreeCAD
 import Part
+from pivy import coin
+from PySide import QtCore
 
 import MBDExporter
 import MBDBasicDimension
@@ -27,6 +29,15 @@ from MBDFeatureControlFrame import MBDFeatureControlFrame
 from MBDPMI import (
     migrate_semantic_pmi_global_links,
     update_pmi_display_layout,
+)
+from MBDViewProvider import (
+    ViewProviderSingleItemFCF,
+    ViewProviderSingleItemDatumTarget,
+    annotation_basis,
+    dragged_annotation_origin,
+    fcf_attachment_point,
+    fcf_cells as view_provider_fcf_cells,
+    symbol_segments,
 )
 
 
@@ -677,6 +688,362 @@ def display_layout_metadata_smoke():
     FreeCAD.closeDocument(reopened.Name)
     os.remove(output_path)
     print("display layout metadata passed")
+
+
+def single_item_fcf_layout_smoke():
+    doc, box_obj = make_doc("MBDSingleItemFCFLayoutSmoke")
+    datum_a = make_datum(doc, box_obj, "A", "Face1")
+    fcf = doc.addObject(
+        "App::DocumentObjectGroupPython",
+        "MBD_FCF_Position"
+    )
+    MBDFeatureControlFrame(fcf)
+    fcf.ToleranceType = "Position"
+    fcf.ToleranceValue = 0.127
+    fcf.DiameterZone = True
+    fcf.DatumReference = datum_a
+    fcf.ControlledObject = box_obj
+    fcf.ControlledSubelement = "Face2"
+    update_pmi_display_layout(
+        fcf,
+        FreeCAD.Vector(10, 20, 30),
+        FreeCAD.Vector(0, 0, 1),
+        FreeCAD.Vector(1, 0, 0),
+        4.0
+    )
+
+    cells = view_provider_fcf_cells(fcf)
+
+    if [kind for kind, _text in cells] != [
+        "symbol",
+        "diameter",
+        "text",
+    ]:
+        raise AssertionError("unexpected single-item FCF cells: {}".format(cells))
+
+    for symbol_name in (
+        "Position",
+        "Flatness",
+        "Parallelism",
+        "Perpendicularity",
+        "Profile of a Line",
+        "Profile of a Surface",
+        "Angularity",
+        "Circularity",
+        "Cylindricity",
+        "Straightness",
+        "Circular Runout",
+        "Total Runout",
+        "Diameter",
+    ):
+        if not symbol_segments(symbol_name):
+            raise AssertionError(
+                "single-item renderer has no strokes for {}".format(
+                    symbol_name
+                )
+            )
+
+    x_axis, y_axis, normal = annotation_basis(fcf)
+
+    if abs(x_axis.dot(y_axis)) > 1e-9:
+        raise AssertionError("annotation basis axes are not perpendicular")
+
+    if abs(x_axis.dot(normal)) > 1e-9 or abs(y_axis.dot(normal)) > 1e-9:
+        raise AssertionError("annotation basis is not in the annotation plane")
+
+    moved = dragged_annotation_origin(
+        fcf.AnnotationOrigin,
+        x_axis,
+        y_axis,
+        (5.0, -2.0, 0.0)
+    )
+    expected = FreeCAD.Vector(15, 18, 30)
+
+    if (moved - expected).Length > 1e-9:
+        raise AssertionError(
+            "dragged annotation origin was {}, expected {}".format(
+                moved,
+                expected
+            )
+        )
+
+    class FakeViewObject:
+
+        def __init__(self, obj):
+            self.Object = obj
+            self.RootNode = coin.SoSeparator()
+            self.Proxy = None
+            self.display_modes = {}
+
+        def addDisplayMode(self, node, name):
+            self.display_modes[name] = node
+
+    fake_view = FakeViewObject(fcf)
+    edit_calls = []
+    reset_calls = []
+
+    class FakeMoveView:
+
+        def __init__(self):
+            self.callbacks = {}
+            self.removed = []
+            self.next_callback = 1
+
+        def addEventCallbackPivy(self, event_type, callback):
+            callback_id = self.next_callback
+            self.next_callback += 1
+            self.callbacks[callback_id] = (event_type, callback)
+            return callback_id
+
+        def removeEventCallbackPivy(self, event_type, callback_id):
+            self.removed.append((event_type, callback_id))
+            self.callbacks.pop(callback_id, None)
+
+        def getPoint(self, x, y):
+            return FreeCAD.Vector(x, y, 30)
+
+        def getViewDirection(self):
+            return FreeCAD.Vector(0, 0, -1)
+
+        def getObjectInfo(self, position):
+            return {
+                "Object": fcf.Name,
+                "ParentObject": fcf,
+                "SubName": fcf.Name,
+            }
+
+    fake_move_view = FakeMoveView()
+
+    class FakeGuiDocument:
+
+        def setEdit(self, obj, mode):
+            edit_calls.append((obj, mode))
+
+        def activeView(self):
+            return fake_move_view
+
+        def resetEdit(self):
+            reset_calls.append(True)
+
+    class FakeEvent:
+
+        def __init__(self, position, button=None, state=None):
+            self.position = position
+            self.button = button
+            self.state = state
+
+        def getPosition(self):
+            return self.position
+
+        def getButton(self):
+            return self.button
+
+        def getState(self):
+            return self.state
+
+    class FakeCallback:
+
+        def __init__(self, event):
+            self.event = event
+
+        def getEvent(self):
+            return self.event
+
+        def setHandled(self):
+            pass
+
+    fake_view.Document = FakeGuiDocument()
+    view_provider = ViewProviderSingleItemFCF(fake_view)
+    view_provider.attach(fake_view)
+
+    if not view_provider.ensure_direct_interaction(fake_view):
+        raise AssertionError("direct FCF interaction did not register")
+
+    direct_callback_ids = set(fake_move_view.callbacks)
+    view_provider.ensure_direct_interaction(fake_view)
+
+    if set(fake_move_view.callbacks) != direct_callback_ids:
+        raise AssertionError("direct FCF interaction registered twice")
+
+    if (
+        fake_view.RootNode.getNumChildren() != 1
+        and not fake_view.display_modes
+    ):
+        raise AssertionError("single-item FCF scene graph was not attached")
+
+    if view_provider.geometry.getNumChildren() < 3:
+        raise AssertionError("single-item FCF scene graph is incomplete")
+
+    view_provider._direct_move_button(FakeCallback(FakeEvent(
+        (10, 20),
+        coin.SoMouseButtonEvent.BUTTON1,
+        coin.SoMouseButtonEvent.DOWN
+    )))
+    view_provider._direct_move_location(FakeCallback(FakeEvent((15, 25))))
+    view_provider._direct_move_button(FakeCallback(FakeEvent(
+        (15, 25),
+        coin.SoMouseButtonEvent.BUTTON1,
+        coin.SoMouseButtonEvent.DOWN
+    )))
+
+    if (fcf.AnnotationOrigin - FreeCAD.Vector(15, 25, 30)).Length > 1e-9:
+        raise AssertionError("direct 3D FCF drag did not update annotation origin")
+
+    if view_provider.direct_active:
+        raise AssertionError("second click did not commit direct 3D FCF drag")
+
+    fcf.AnnotationOrigin = FreeCAD.Vector(10, 20, 30)
+    fcf.DisplayLayoutMode = "Automatic"
+    fcf.DisplayLayoutLocked = False
+
+    if not view_provider.start_edit(fake_view):
+        raise AssertionError("single-item FCF edit request failed")
+
+    if edit_calls != [(fcf, 0)]:
+        raise AssertionError(
+            "FCF edit mode used the wrong GUI document call: {}".format(
+                edit_calls
+            )
+        )
+
+    if not view_provider.setEdit(fake_view, 0):
+        raise AssertionError("single-item FCF did not enter drag edit mode")
+
+    view_provider._move_button(FakeCallback(FakeEvent(
+        (10, 20),
+        coin.SoMouseButtonEvent.BUTTON1,
+        coin.SoMouseButtonEvent.DOWN
+    )))
+    view_provider._move_location(FakeCallback(FakeEvent((13, 24))))
+    view_provider._move_button(FakeCallback(FakeEvent(
+        (13, 24),
+        coin.SoMouseButtonEvent.BUTTON1,
+        coin.SoMouseButtonEvent.DOWN
+    )))
+    QtCore.QCoreApplication.processEvents()
+
+    if (fcf.AnnotationOrigin - FreeCAD.Vector(13, 24, 30)).Length > 1e-9:
+        raise AssertionError("FCF mouse move did not update annotation origin")
+
+    if (
+        fcf.DisplayLayoutMode != "Manual"
+        or not fcf.DisplayLayoutLocked
+    ):
+        raise AssertionError("FCF mouse move did not persist manual layout state")
+
+    if view_provider.move_active:
+        raise AssertionError("second left click did not commit FCF movement")
+
+    if not view_provider.unsetEdit(fake_view, 0):
+        raise AssertionError("single-item FCF did not leave drag edit mode")
+
+    if len(fake_move_view.callbacks) != 2:
+        raise AssertionError("direct FCF callbacks were removed with edit mode")
+
+    view_provider.onDelete(fake_view, [])
+
+    if fake_move_view.callbacks:
+        raise AssertionError("direct FCF callbacks were not removed on delete")
+
+    restored_provider = ViewProviderSingleItemFCF.__new__(
+        ViewProviderSingleItemFCF
+    )
+    restored_provider.Object = fcf
+    restored_root = coin.SoSeparator()
+    restored_provider.root = restored_root
+    restored_provider._ensure_runtime_state()
+
+    if restored_provider.root is not restored_root:
+        raise AssertionError("restored FCF scene graph state was overwritten")
+
+    if not hasattr(restored_provider, "move_active"):
+        raise AssertionError("restored FCF move state was not initialized")
+
+    import MBDCommands
+
+    MBDCommands.create_fcf_display(doc, fcf)
+    helper_names = [child.Name for child in fcf.Group]
+
+    if len(helper_names) < 4:
+        raise AssertionError("legacy FCF helper fixture was not created")
+
+    removed = MBDCommands.clear_fcf_display_helpers(doc, fcf)
+
+    if removed != len(helper_names):
+        raise AssertionError(
+            "removed {} FCF helpers, expected {}".format(
+                removed,
+                len(helper_names)
+            )
+        )
+
+    if fcf.Group:
+        raise AssertionError("legacy FCF helper group was not emptied")
+
+    if any(doc.getObject(name) is not None for name in helper_names):
+        raise AssertionError("legacy FCF helper objects remain in the document")
+
+    if any(
+        getattr(fcf, property_name, None) is not None
+        for property_name in ("DisplayFrame", "DisplayText", "DisplayLeader")
+    ):
+        raise AssertionError("legacy FCF helper links were not cleared")
+
+    target = doc.addObject(
+        "App::DocumentObjectGroupPython",
+        "MBD_DatumTarget_A1"
+    )
+    MBDDatumTarget.MBDDatumTarget(target)
+    target.TargetId = "A1"
+    target.ParentDatum = datum_a
+    target.ConstructionObject = box_obj
+    target.ReferencedObject = box_obj
+    target.ReferencedSubelement = "Face1"
+    target.TargetPoint = FreeCAD.Vector(0, 10, 15)
+    update_pmi_display_layout(
+        target,
+        FreeCAD.Vector(-5, 10, 15),
+        FreeCAD.Vector(0, 0, 1),
+        FreeCAD.Vector(1, 0, 0),
+        4.0
+    )
+    fake_target_view = FakeViewObject(target)
+    fake_target_view.Document = FakeGuiDocument()
+    target_view_provider = ViewProviderSingleItemDatumTarget(
+        fake_target_view
+    )
+    target_view_provider.attach(fake_target_view)
+
+    if target_view_provider.geometry.getNumChildren() < 5:
+        raise AssertionError("single-item datum target scene graph is incomplete")
+
+    if target_view_provider.claimChildren():
+        raise AssertionError("single-item datum target claims helper children")
+
+    MBDCommands.create_datum_target_display_text(doc, target)
+    target_helper_names = [child.Name for child in target.Group]
+
+    if not target_helper_names:
+        raise AssertionError("legacy datum target helper fixture was not created")
+
+    removed_targets = MBDCommands.clear_datum_target_display_helpers(
+        doc,
+        target
+    )
+
+    if removed_targets != len(target_helper_names):
+        raise AssertionError(
+            "removed {} target helpers, expected {}".format(
+                removed_targets,
+                len(target_helper_names)
+            )
+        )
+
+    if target.Group or target.DisplayText is not None:
+        raise AssertionError("legacy datum target helper state was not cleared")
+
+    FreeCAD.closeDocument(doc.Name)
+    print("single-item FCF layout passed")
 
 
 def global_geometry_link_scope_smoke():
@@ -1486,6 +1853,99 @@ def cylinder_axis_dimension_smoke():
     print("cylinder axis dimension patterns passed")
 
 
+def position_fcf_hole_opening_direction_smoke():
+    doc = FreeCAD.newDocument("MBDPositionFCFHoleOpeningSmoke")
+
+    import MBDCommands
+
+    body = doc.addObject("Part::Feature", "BlindHoleBody")
+    box = Part.makeBox(40, 40, 30)
+    cutter = Part.makeCylinder(
+        5,
+        20,
+        FreeCAD.Vector(20, 20, 30),
+        FreeCAD.Vector(0, 0, -1)
+    )
+    body.Shape = box.cut(cutter)
+    doc.recompute()
+
+    cylinder_face = None
+
+    for index, face in enumerate(body.Shape.Faces):
+        try:
+            if "cylinder" in face.Surface.__class__.__name__.lower():
+                cylinder_face = "Face{}".format(index + 1)
+                break
+        except Exception:
+            pass
+
+    if cylinder_face is None:
+        FreeCAD.closeDocument(doc.Name)
+        raise AssertionError("blind-hole cylindrical face was not found")
+
+    cylinder = MBDDimension.cylindrical_face_reference(
+        body,
+        cylinder_face
+    )
+
+    if cylinder is None or cylinder["opening_direction"] is None:
+        FreeCAD.closeDocument(doc.Name)
+        raise AssertionError("blind-hole opening direction was not resolved")
+
+    opening_point = cylinder["point"]
+    opening_direction = cylinder["opening_direction"]
+
+    if opening_direction.z <= 0.9:
+        FreeCAD.closeDocument(doc.Name)
+        raise AssertionError(
+            "blind-hole opening direction was {}, expected +Z".format(
+                opening_direction
+            )
+        )
+
+    fcf = doc.addObject(
+        "App::DocumentObjectGroupPython",
+        "MBD_FCF_Position"
+    )
+    MBDFeatureControlFrame(fcf)
+    fcf.ToleranceType = "Position"
+    fcf.ToleranceValue = 0.127
+    fcf.DiameterZone = True
+    fcf.ControlledObject = body
+    fcf.ControlledSubelement = cylinder_face
+
+    _frame, _text, leader = MBDCommands.create_fcf_display(doc, fcf)
+    attachment = fcf_attachment_point(fcf)
+    origin_offset = fcf.AnnotationOrigin - opening_point
+
+    if origin_offset.dot(opening_direction) <= 0:
+        FreeCAD.closeDocument(doc.Name)
+        raise AssertionError(
+            "position FCF origin was not placed beyond the hole opening"
+        )
+
+    if attachment is None or (attachment - opening_point).Length > 1e-6:
+        FreeCAD.closeDocument(doc.Name)
+        raise AssertionError(
+            "single-item FCF leader did not attach at the hole opening"
+        )
+
+    if leader is not None:
+        leader_points = [vertex.Point for vertex in leader.Shape.Vertexes]
+
+        if not any(
+            (point - opening_point).Length <= 1e-6
+            for point in leader_points
+        ):
+            FreeCAD.closeDocument(doc.Name)
+            raise AssertionError(
+                "helper FCF leader did not attach at the hole opening"
+            )
+
+    FreeCAD.closeDocument(doc.Name)
+    print("position FCF blind-hole opening direction passed")
+
+
 def radius_dimension_display_smoke():
     doc = FreeCAD.newDocument("MBDRadiusDimensionDisplaySmoke")
 
@@ -1897,6 +2357,17 @@ def profile_fcf_display_smoke():
 
     import MBDCommands
 
+    preferred_point = FreeCAD.Vector(5, 10, 30)
+    box_obj.Shape = box_obj.Shape.cut(
+        Part.makeCylinder(
+            3,
+            15,
+            preferred_point,
+            FreeCAD.Vector(0, 0, -1)
+        )
+    )
+    doc.recompute()
+
     fcf = doc.addObject(
         "App::DocumentObjectGroupPython",
         "MBD_FCF_Profile"
@@ -1914,6 +2385,11 @@ def profile_fcf_display_smoke():
     cells = MBDCommands.fcf_cells(fcf)
     validation_errors = MBDValidation.validate_fcf(fcf)
     group_size = len(fcf.Group) if hasattr(fcf, "Group") else 0
+    attachment = fcf_attachment_point(fcf)
+    attachment_distance = (
+        Part.Vertex(attachment).distToShape(box_obj.Shape)[0]
+        if attachment is not None else None
+    )
     FreeCAD.closeDocument(doc.Name)
 
     if frame_obj is None or text_obj is None or leader_obj is None:
@@ -1932,6 +2408,16 @@ def profile_fcf_display_smoke():
 
     if group_size < 4:
         raise AssertionError("profile FCF display helpers were not grouped")
+
+    if attachment is None or attachment_distance > 1e-7:
+        raise AssertionError(
+            "profile all-over leader does not touch the controlled body"
+        )
+
+    if (attachment - preferred_point).Length <= 1e-7:
+        raise AssertionError(
+            "profile all-over leader remained on the bounding-box envelope"
+        )
 
     print("profile FCF display passed")
 
@@ -2166,11 +2652,13 @@ def main():
             "common-datum-system-validation",
             "common-datum-export",
             "display-layout-metadata",
+            "single-item-fcf-layout",
             "global-geometry-link-scope",
             "fcf-rule-validation",
             "dimension-reference-patterns",
             "basic-size-dimension-requires-profile",
             "cylinder-axis-dimensions",
+            "position-fcf-hole-opening-direction",
             "radius-dimension-display",
             "annotation-display-shape",
             "preferred-display-offset",
@@ -2219,6 +2707,8 @@ def main():
         common_datum_export_smoke(args.output)
     elif args.mode == "display-layout-metadata":
         display_layout_metadata_smoke()
+    elif args.mode == "single-item-fcf-layout":
+        single_item_fcf_layout_smoke()
     elif args.mode == "global-geometry-link-scope":
         global_geometry_link_scope_smoke()
     elif args.mode == "fcf-rule-validation":
@@ -2229,6 +2719,8 @@ def main():
         basic_size_dimension_requires_profile_smoke()
     elif args.mode == "cylinder-axis-dimensions":
         cylinder_axis_dimension_smoke()
+    elif args.mode == "position-fcf-hole-opening-direction":
+        position_fcf_hole_opening_direction_smoke()
     elif args.mode == "radius-dimension-display":
         radius_dimension_display_smoke()
     elif args.mode == "annotation-display-shape":

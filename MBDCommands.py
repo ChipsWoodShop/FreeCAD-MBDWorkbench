@@ -24,8 +24,10 @@ from MBDDimension import (
     ViewProviderMBDDimension,
     DIMENSION_PURPOSES,
     DIMENSION_PURPOSE_CHOICES,
+    cylindrical_face_reference,
     dimension_display_label,
     measurement_from_references,
+    nearest_point_on_shape,
     update_dimension_signature
 )
 from MBDDatum import MBDDatumFeature, ViewProviderMBDDatumFeature
@@ -183,6 +185,36 @@ def organize_pmi_tree(doc):
             synchronize_datum_system_label(obj)
 
         add_to_mbd_pmi_group(doc, obj)
+
+        if FreeCAD.GuiUp and hasattr(obj, "ToleranceType"):
+            proxy = getattr(getattr(obj, "ViewObject", None), "Proxy", None)
+
+            if not hasattr(proxy, "rebuild"):
+                ViewProviderMBDFeatureControlFrame(obj.ViewObject)
+                proxy = getattr(obj.ViewObject, "Proxy", None)
+
+            clear_fcf_display_helpers(doc, obj)
+
+            if hasattr(proxy, "rebuild"):
+                proxy.rebuild()
+
+            if hasattr(proxy, "ensure_direct_interaction"):
+                proxy.ensure_direct_interaction(
+                    obj.ViewObject,
+                    verbose=True
+                )
+
+        if FreeCAD.GuiUp and hasattr(obj, "TargetId"):
+            proxy = getattr(getattr(obj, "ViewObject", None), "Proxy", None)
+
+            if not hasattr(proxy, "rebuild"):
+                ViewProviderMBDDatumTarget(obj.ViewObject)
+                proxy = getattr(obj.ViewObject, "Proxy", None)
+
+            clear_datum_target_display_helpers(doc, obj)
+
+            if hasattr(proxy, "rebuild"):
+                proxy.rebuild()
 
     return group
 
@@ -460,6 +492,84 @@ def is_pmi_display_helper(obj):
         pass
 
     return False
+
+
+def clear_fcf_display_helpers(doc, fcf_obj):
+    helpers = []
+
+    for property_name in ("DisplayFrame", "DisplayText", "DisplayLeader"):
+        try:
+            helper = getattr(fcf_obj, property_name, None)
+
+            if helper is not None and helper not in helpers:
+                helpers.append(helper)
+
+            setattr(fcf_obj, property_name, None)
+        except Exception:
+            pass
+
+    try:
+        for child in list(fcf_obj.Group):
+            if getattr(child, "IsSemanticPMI", False):
+                continue
+
+            if child not in helpers:
+                helpers.append(child)
+    except Exception:
+        pass
+
+    for helper in helpers:
+        try:
+            if hasattr(fcf_obj, "removeObject"):
+                fcf_obj.removeObject(helper)
+        except Exception:
+            pass
+
+        try:
+            if doc.getObject(helper.Name) is not None:
+                doc.removeObject(helper.Name)
+        except Exception:
+            pass
+
+    return len(helpers)
+
+
+def clear_datum_target_display_helpers(doc, target_obj):
+    helper = getattr(target_obj, "DisplayText", None)
+
+    try:
+        target_obj.DisplayText = None
+    except Exception:
+        pass
+
+    helpers = []
+
+    if helper is not None:
+        helpers.append(helper)
+
+    try:
+        for child in list(target_obj.Group):
+            if getattr(child, "IsSemanticPMI", False):
+                continue
+
+            if child not in helpers:
+                helpers.append(child)
+    except Exception:
+        pass
+
+    for child in helpers:
+        try:
+            target_obj.removeObject(child)
+        except Exception:
+            pass
+
+        try:
+            if doc.getObject(child.Name) is not None:
+                doc.removeObject(child.Name)
+        except Exception:
+            pass
+
+    return len(helpers)
 
 
 def document_shape_bound_box(doc):
@@ -1849,14 +1959,54 @@ def create_datum_target_display_text(doc, target_obj):
     if target_obj.ParentDatum is not None:
         normal = datum_outward_normal(doc, target_obj.ParentDatum)
 
-    point = target_obj.TargetPoint
+    point = FreeCAD.Vector(target_obj.TargetPoint)
+    height = pmi_text_height(doc)
+    offset = FreeCAD.Vector(0, 0, height * 1.5)
+
+    if normal is not None and finite_vector(normal) and normal.Length > 0:
+        offset = FreeCAD.Vector(normal)
+        offset.normalize()
+        offset.multiply(height * 1.5)
+
+    label_point = point + offset
+    rotation = None
+
+    if normal is not None:
+        rotation = text_rotation_for_display_line(
+            label_point,
+            label_point + FreeCAD.Vector(1, 0, 0),
+            normal
+        )
+
+    plane_normal = (
+        rotation.multVec(FreeCAD.Vector(0, 0, 1))
+        if rotation else normal
+    )
+    reading_direction = (
+        rotation.multVec(FreeCAD.Vector(1, 0, 0))
+        if rotation else FreeCAD.Vector(1, 0, 0)
+    )
+    update_pmi_display_layout(
+        target_obj,
+        label_point,
+        plane_normal,
+        reading_direction,
+        height
+    )
+    proxy = getattr(getattr(target_obj, "ViewObject", None), "Proxy", None)
+
+    if hasattr(proxy, "rebuild"):
+        clear_datum_target_display_helpers(doc, target_obj)
+        proxy.rebuild()
+        return target_obj
 
     text_obj = make_pmi_label_text(
         doc,
         point,
         target_obj.TargetId,
         target_obj.Name,
-        normal
+        normal,
+        height
     )
 
     if text_obj is not None:
@@ -1874,14 +2024,6 @@ def create_datum_target_display_text(doc, target_obj):
 
         if hasattr(text_height, "Value"):
             text_height = text_height.Value
-
-        update_pmi_display_layout(
-            target_obj,
-            text_obj.Placement.Base,
-            rotation.multVec(FreeCAD.Vector(0, 0, 1)),
-            rotation.multVec(FreeCAD.Vector(1, 0, 0)),
-            text_height
-        )
 
     return text_obj
 
@@ -2214,6 +2356,17 @@ def create_fcf_display(doc, fcf_obj):
         fcf_obj.ControlledSubelement
     )
     normal = None
+    position_cylinder = None
+
+    if str(getattr(fcf_obj, "ToleranceType", "")) == "Position":
+        position_cylinder = cylindrical_face_reference(
+            fcf_obj.ControlledObject,
+            fcf_obj.ControlledSubelement
+        )
+
+        if position_cylinder is not None:
+            point = position_cylinder["point"]
+            normal = position_cylinder.get("opening_direction")
 
     if (
         point is None
@@ -2222,10 +2375,14 @@ def create_fcf_display(doc, fcf_obj):
     ):
         try:
             bbox = fcf_obj.ControlledObject.Shape.BoundBox
-            point = FreeCAD.Vector(
+            preferred_point = FreeCAD.Vector(
                 (bbox.XMin + bbox.XMax) * 0.5,
                 (bbox.YMin + bbox.YMax) * 0.5,
                 bbox.ZMax
+            )
+            point = nearest_point_on_shape(
+                fcf_obj.ControlledObject,
+                preferred_point
             )
             normal = FreeCAD.Vector(0, 0, 1)
         except Exception:
@@ -2287,6 +2444,28 @@ def create_fcf_display(doc, fcf_obj):
             rotation
         )
 
+    plane_normal = (
+        rotation.multVec(FreeCAD.Vector(0, 0, 1))
+        if rotation else normal
+    )
+    reading_direction = (
+        rotation.multVec(FreeCAD.Vector(1, 0, 0))
+        if rotation else FreeCAD.Vector(1, 0, 0)
+    )
+    update_pmi_display_layout(
+        fcf_obj,
+        frame_origin,
+        plane_normal,
+        reading_direction,
+        text_height
+    )
+    proxy = getattr(getattr(fcf_obj, "ViewObject", None), "Proxy", None)
+
+    if hasattr(proxy, "rebuild"):
+        clear_fcf_display_helpers(doc, fcf_obj)
+        proxy.rebuild()
+        return fcf_obj, None, None
+
     text_objects = make_fcf_cell_texts(
         doc,
         frame_origin,
@@ -2310,21 +2489,6 @@ def create_fcf_display(doc, fcf_obj):
     fcf_obj.DisplayFrame = frame_obj
     fcf_obj.DisplayLeader = leader_obj
     add_display_children(fcf_obj, frame_obj, leader_obj, *text_objects)
-    plane_normal = (
-        rotation.multVec(FreeCAD.Vector(0, 0, 1))
-        if rotation else normal
-    )
-    reading_direction = (
-        rotation.multVec(FreeCAD.Vector(1, 0, 0))
-        if rotation else FreeCAD.Vector(1, 0, 0)
-    )
-    update_pmi_display_layout(
-        fcf_obj,
-        frame_origin,
-        plane_normal,
-        reading_direction,
-        text_height
-    )
 
     return frame_obj, text_obj, leader_obj
 
@@ -4074,10 +4238,14 @@ class CreateFeatureControlFrameCommand:
         add_to_mbd_pmi_group(doc, fcf_obj)
 
         if FreeCAD.GuiUp:
-            ViewProviderMBDFeatureControlFrame(
+            view_provider = ViewProviderMBDFeatureControlFrame(
                 fcf_obj.ViewObject
             )
             create_fcf_display(doc, fcf_obj)
+            view_provider.ensure_direct_interaction(
+                fcf_obj.ViewObject,
+                verbose=True
+            )
 
         doc.recompute()
 
