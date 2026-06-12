@@ -32,11 +32,14 @@ from MBDPMI import (
 )
 from MBDViewProvider import (
     ViewProviderSingleItemFCF,
+    ViewProviderSingleItemDatumFeature,
     ViewProviderSingleItemDatumTarget,
+    ViewProviderSingleItemDimension,
     annotation_basis,
     dragged_annotation_origin,
     fcf_attachment_point,
     fcf_cells as view_provider_fcf_cells,
+    fcf_leader_segments,
     symbol_segments,
 )
 
@@ -1046,6 +1049,249 @@ def single_item_fcf_layout_smoke():
     print("single-item FCF layout passed")
 
 
+def single_item_datum_feature_layout_smoke():
+    doc, box_obj = make_doc("MBDSingleItemDatumFeatureLayoutSmoke")
+    datum = make_datum(doc, box_obj, "A", "Face1")
+    update_pmi_display_layout(
+        datum,
+        FreeCAD.Vector(0, 0, -12),
+        FreeCAD.Vector(0, 1, 0),
+        FreeCAD.Vector(0, 0, -1),
+        4.0
+    )
+
+    class FakeViewObject:
+
+        def __init__(self, obj):
+            self.Object = obj
+            self.RootNode = coin.SoSeparator()
+            self.Proxy = None
+            self.display_modes = {}
+
+        def addDisplayMode(self, node, name):
+            self.display_modes[name] = node
+
+    fake_view = FakeViewObject(datum)
+    view_provider = ViewProviderSingleItemDatumFeature(fake_view)
+    view_provider.attach(fake_view)
+
+    if view_provider.geometry.getNumChildren() < 5:
+        raise AssertionError(
+            "single-item datum feature scene graph is incomplete"
+        )
+
+    if view_provider.claimChildren():
+        raise AssertionError("single-item datum feature claims helper children")
+
+    helper_names = []
+
+    for property_name, suffix in (
+        ("DisplayText", "_Text"),
+        ("DisplayFrame", "_Frame"),
+        ("DisplayMarker", "_Marker"),
+        ("DisplayLeader", "_Leader"),
+    ):
+        helper = doc.addObject("Part::Feature", datum.Name + suffix)
+        helper.Shape = Part.makeLine(
+            FreeCAD.Vector(0, 0, 0),
+            FreeCAD.Vector(1, 0, 0)
+        )
+        setattr(datum, property_name, helper)
+        datum.addObject(helper)
+        helper_names.append(helper.Name)
+
+    import MBDCommands
+
+    removed = MBDCommands.clear_datum_display_helpers(doc, datum)
+
+    if removed != len(helper_names):
+        raise AssertionError(
+            "removed {} datum helpers, expected {}".format(
+                removed,
+                len(helper_names)
+            )
+        )
+
+    if datum.Group:
+        raise AssertionError("legacy datum helper group was not emptied")
+
+    if any(doc.getObject(name) is not None for name in helper_names):
+        raise AssertionError("legacy datum helper objects remain")
+
+    if any(
+        getattr(datum, property_name, None) is not None
+        for property_name in (
+            "DisplayText",
+            "DisplayFrame",
+            "DisplayMarker",
+            "DisplayLeader",
+        )
+    ):
+        raise AssertionError("legacy datum helper links were not cleared")
+
+    legacy = make_datum(doc, box_obj, "B", "Face2")
+
+    for property_name in (
+        "AnnotationOrigin",
+        "AnnotationNormal",
+        "AnnotationDirection",
+        "AnnotationTextHeight",
+    ):
+        legacy.removeProperty(property_name)
+
+    legacy_fake_view = FakeViewObject(legacy)
+    legacy_provider = ViewProviderSingleItemDatumFeature(legacy_fake_view)
+    legacy_provider.attach(legacy_fake_view)
+
+    if not hasattr(legacy, "AnnotationOrigin"):
+        raise AssertionError("legacy datum display layout was not initialized")
+
+    FreeCAD.closeDocument(doc.Name)
+    print("single-item datum feature layout passed")
+
+
+def single_item_dimension_layout_smoke():
+    doc, box_obj = make_doc("MBDSingleItemDimensionLayoutSmoke")
+
+    import MBDCommands
+
+    object_count = len(doc.Objects)
+    layout = MBDCommands.dimension_display_layout(
+        doc,
+        FreeCAD.Vector(0, 0, 0),
+        FreeCAD.Vector(10, 0, 0),
+        "10.000 mm +/- 0.100 mm",
+        "Linear",
+        preferred_offset=FreeCAD.Vector(0, 10, 0),
+        text_normal=FreeCAD.Vector(0, 0, 1),
+        text_height=3.0
+    )
+
+    if layout is None:
+        raise AssertionError("pure dimension layout was not resolved")
+
+    if len(doc.Objects) != object_count:
+        raise AssertionError(
+            "dimension layout created temporary document objects"
+        )
+
+    dimension = doc.addObject(
+        "App::DocumentObjectGroupPython",
+        "MBD_Dimension001"
+    )
+    MBDDimension.MBDDimension(dimension)
+    dimension.DimensionPurpose = "EqualBilateral"
+    dimension.DimensionKind = "Linear"
+    dimension.MeasurementType = "Distance"
+    dimension.NominalValue = 10.0
+    dimension.UpperTolerance = 0.1
+    dimension.LowerTolerance = 0.1
+    dimension.ReferenceObject1 = box_obj
+    dimension.ReferenceSubelement1 = "Face1"
+    dimension.ReferenceObject2 = box_obj
+    dimension.ReferenceSubelement2 = "Face2"
+    update_pmi_display_layout(
+        dimension,
+        FreeCAD.Vector(5, -8, 15),
+        FreeCAD.Vector(0, 0, 1),
+        FreeCAD.Vector(1, 0, 0),
+        3.0
+    )
+
+    class FakeGuiDocument:
+
+        def activeView(self):
+            return None
+
+    class FakeViewObject:
+
+        def __init__(self, obj):
+            self.Object = obj
+            self.Document = FakeGuiDocument()
+            self.RootNode = coin.SoSeparator()
+            self.Proxy = None
+            self.display_modes = {}
+
+        def addDisplayMode(self, node, name):
+            self.display_modes[name] = node
+
+    fake_view = FakeViewObject(dimension)
+    provider = ViewProviderSingleItemDimension(fake_view)
+    provider.attach(fake_view)
+
+    if provider.geometry.getNumChildren() < 5:
+        raise AssertionError(
+            "single-item linear dimension scene graph is incomplete"
+        )
+
+    if provider.claimChildren():
+        raise AssertionError("single-item dimension claims helper children")
+
+    helper_names = []
+
+    for property_name, suffix in (
+        ("DisplayDimension", "_Display"),
+        ("DisplayText", "_Text"),
+        ("DisplayTextBox", "_TextBox"),
+    ):
+        helper = doc.addObject("Part::Feature", dimension.Name + suffix)
+        helper.Shape = Part.makeLine(
+            FreeCAD.Vector(0, 0, 0),
+            FreeCAD.Vector(1, 0, 0)
+        )
+        dimension.addObject(helper)
+        setattr(dimension, property_name, helper)
+        helper_names.append(helper.Name)
+
+    removed = MBDCommands.clear_dimension_display_helpers(doc, dimension)
+
+    if removed != 3:
+        raise AssertionError(
+            "removed {} dimension helpers, expected 3".format(removed)
+        )
+
+    if dimension.Group:
+        raise AssertionError("dimension helper group was not emptied")
+
+    if any(doc.getObject(name) is not None for name in helper_names):
+        raise AssertionError("dimension helper objects remain in document")
+
+    basic = doc.addObject(
+        "App::DocumentObjectGroupPython",
+        "MBD_BasicDimension001"
+    )
+    MBDBasicDimension.MBDBasicDimension(basic)
+    basic.DimensionType = "Distance"
+    basic.NominalValue = 10.0
+    basic.ReferenceObject1 = box_obj
+    basic.ReferenceSubelement1 = "Face1"
+    basic.ReferenceObject2 = box_obj
+    basic.ReferenceSubelement2 = "Face2"
+    update_pmi_display_layout(
+        basic,
+        FreeCAD.Vector(5, 28, 15),
+        FreeCAD.Vector(0, 0, 1),
+        FreeCAD.Vector(1, 0, 0),
+        3.0
+    )
+    fake_basic_view = FakeViewObject(basic)
+    basic_provider = ViewProviderSingleItemDimension(fake_basic_view)
+    basic_provider.attach(fake_basic_view)
+
+    if basic_provider.geometry.getNumChildren() < 5:
+        raise AssertionError(
+            "single-item basic dimension scene graph is incomplete"
+        )
+
+    if basic_provider.claimChildren():
+        raise AssertionError(
+            "single-item basic dimension claims helper children"
+        )
+
+    FreeCAD.closeDocument(doc.Name)
+    print("single-item dimension layout passed")
+
+
 def global_geometry_link_scope_smoke():
     output_path = "/tmp/mbd_global_geometry_links.FCStd"
 
@@ -1470,7 +1716,7 @@ def semantic_dimension_smoke():
     point_b.Shape = Part.Vertex(25.4, 0, 0)
     doc.recompute()
 
-    dim = doc.addObject("App::DocumentObjectGroupPython", "MBD_Dimension001")
+    dim = doc.addObject("App::FeaturePython", "MBD_Dimension001")
     MBDDimension.MBDDimension(dim)
     dim.DimensionPurpose = "EqualBilateral"
     dim.DimensionKind = "Linear"
@@ -1481,6 +1727,9 @@ def semantic_dimension_smoke():
     dim.ReferenceObject1 = point_a
     dim.ReferenceObject2 = point_b
     MBDDimension.update_dimension_signature(dim)
+
+    if dim.TypeId != "App::FeaturePython":
+        raise AssertionError("semantic dimension is not a single feature item")
 
     report = MBDValidation.validate_document_structured(doc)
     issues = [
@@ -1917,6 +2166,12 @@ def position_fcf_hole_opening_direction_smoke():
     _frame, _text, leader = MBDCommands.create_fcf_display(doc, fcf)
     attachment = fcf_attachment_point(fcf)
     origin_offset = fcf.AnnotationOrigin - opening_point
+    leader_segments = fcf_leader_segments(
+        fcf,
+        opening_point,
+        fcf.AnnotationOrigin,
+        fcf.AnnotationTextHeight
+    )
 
     if origin_offset.dot(opening_direction) <= 0:
         FreeCAD.closeDocument(doc.Name)
@@ -1928,6 +2183,157 @@ def position_fcf_hole_opening_direction_smoke():
         FreeCAD.closeDocument(doc.Name)
         raise AssertionError(
             "single-item FCF leader did not attach at the hole opening"
+        )
+
+    first_leg = leader_segments[0][1] - leader_segments[0][0]
+
+    if first_leg.Length <= 1e-9:
+        FreeCAD.closeDocument(doc.Name)
+        raise AssertionError("position FCF axis leader leg was null")
+
+    first_leg.normalize()
+
+    if abs(first_leg.dot(opening_direction)) < 0.999:
+        FreeCAD.closeDocument(doc.Name)
+        raise AssertionError(
+            "position FCF first leader leg was not parallel to the hole axis"
+        )
+
+    diameter_measurement = MBDDimension.measurement_from_references(
+        "Diameter",
+        "Distance",
+        body,
+        cylinder_face,
+        None,
+        ""
+    )
+    diameter_direction = diameter_measurement.get("display_direction")
+
+    if diameter_direction is None:
+        FreeCAD.closeDocument(doc.Name)
+        raise AssertionError("diameter display direction was not resolved")
+
+    diameter_direction.normalize()
+
+    if diameter_direction.dot(opening_direction) < 0.999:
+        FreeCAD.closeDocument(doc.Name)
+        raise AssertionError(
+            "diameter display direction did not follow the hole opening axis"
+        )
+
+    diameter = MBDCommands.create_dimension_object(
+        doc,
+        body,
+        cylinder_face,
+        dimension_purpose="EqualBilateral",
+        dimension_kind="Diameter",
+        upper_tolerance=0.1,
+        lower_tolerance=0.1,
+        resolved_measurement=diameter_measurement
+    )
+
+    if diameter is None:
+        FreeCAD.closeDocument(doc.Name)
+        raise AssertionError("diameter dimension was not created")
+
+    plane_normal = MBDCommands.diameter_annotation_plane_normal(
+        diameter_measurement["point1"],
+        diameter_measurement["point2"],
+        opening_direction
+    )
+
+    if plane_normal is None:
+        FreeCAD.closeDocument(doc.Name)
+        raise AssertionError("diameter annotation plane was not resolved")
+
+    diameter_layout = MBDCommands.dimension_display_layout(
+        doc,
+        diameter_measurement["point1"],
+        diameter_measurement["point2"],
+        MBDDimension.dimension_display_label(diameter),
+        "Diameter",
+        MBDCommands.preferred_display_offset_beyond_model(
+            doc,
+            diameter_measurement["point1"],
+            diameter_measurement["point2"],
+            opening_direction,
+            3.0
+        ),
+        plane_normal,
+        3.0
+    )
+    update_pmi_display_layout(
+        diameter,
+        diameter_layout["origin"],
+        diameter_layout["normal"],
+        diameter_layout["direction"],
+        3.0
+    )
+    radial_direction = (
+        diameter_measurement["point2"]
+        - diameter_measurement["point1"]
+    )
+    radial_direction.normalize()
+    diameter_plane_normal = FreeCAD.Vector(diameter.AnnotationNormal)
+    diameter_plane_normal.normalize()
+
+    if abs(diameter_plane_normal.dot(opening_direction)) > 1e-6:
+        FreeCAD.closeDocument(doc.Name)
+        raise AssertionError(
+            "diameter text plane does not contain the hole-axis leaders"
+        )
+
+    if abs(diameter_plane_normal.dot(radial_direction)) > 1e-6:
+        FreeCAD.closeDocument(doc.Name)
+        raise AssertionError(
+            "diameter text plane does not contain the dimension line"
+        )
+
+    MBDCommands.create_fcf_display(doc, fcf)
+    fcf_plane_normal = FreeCAD.Vector(fcf.AnnotationNormal)
+    fcf_plane_normal.normalize()
+
+    if abs(abs(fcf_plane_normal.dot(diameter_plane_normal)) - 1.0) > 1e-6:
+        FreeCAD.closeDocument(doc.Name)
+        raise AssertionError(
+            "position FCF does not share the diameter annotation plane"
+        )
+
+    if fcf_leader_segments(
+        fcf,
+        opening_point,
+        fcf.AnnotationOrigin,
+        fcf.AnnotationTextHeight
+    ):
+        FreeCAD.closeDocument(doc.Name)
+        raise AssertionError(
+            "position FCF retained a redundant leader with a diameter dimension"
+        )
+
+    dim_x, dim_y, _dim_normal = annotation_basis(diameter)
+    _fcf_x, fcf_y, _fcf_normal = annotation_basis(fcf)
+    right_point = diameter_measurement["point1"]
+
+    if (
+        diameter_measurement["point2"].dot(dim_x)
+        > diameter_measurement["point1"].dot(dim_x)
+    ):
+        right_point = diameter_measurement["point2"]
+
+    extension_line_point = (
+        diameter.AnnotationOrigin
+        + dim_x
+        * (right_point - diameter.AnnotationOrigin).dot(dim_x)
+    )
+    fcf_top_left = (
+        fcf.AnnotationOrigin
+        + fcf_y * (fcf.AnnotationTextHeight * 1.6)
+    )
+
+    if (fcf_top_left - extension_line_point).Length > 1e-6:
+        FreeCAD.closeDocument(doc.Name)
+        raise AssertionError(
+            "position FCF did not attach directly to the diameter extension line"
         )
 
     if leader is not None:
@@ -2211,6 +2617,17 @@ def fcf_below_dimension_smoke():
     )
     dim_obj.DisplayText = dim_text
     dim_obj.addObject(dim_text)
+    dim_y = dim_text.Placement.Base.y
+    update_pmi_display_layout(
+        dim_obj,
+        dim_text.Placement.Base,
+        FreeCAD.Vector(0, 0, 1),
+        FreeCAD.Vector(1, 0, 0),
+        3.0
+    )
+    dim_obj.removeObject(dim_text)
+    dim_obj.DisplayText = None
+    doc.removeObject(dim_text.Name)
 
     _datum_a, _datum_b, _datum_c, datum_system = make_datum_set(doc, box_obj)
     fcf = doc.addObject(
@@ -2227,7 +2644,6 @@ def fcf_below_dimension_smoke():
 
     frame_obj, _text_obj, _leader_obj = MBDCommands.create_fcf_display(doc, fcf)
     frame_y_max = frame_obj.Shape.BoundBox.YMax
-    dim_y = dim_text.Placement.Base.y
     FreeCAD.closeDocument(doc.Name)
 
     if frame_y_max >= dim_y:
@@ -2620,6 +3036,24 @@ def pmi_text_height_ignores_helpers_smoke():
     fcf.ControlledSubelement = "Face1"
     MBDCommands.create_fcf_display(doc, fcf)
     after_height = MBDCommands.pmi_text_height(doc)
+
+    body = doc.addObject("PartDesign::Body", "Body")
+    feature1 = body.newObject("PartDesign::Feature", "Feature1")
+    feature1.Shape = Part.makeBox(5, 5, 5)
+    feature2 = body.newObject("PartDesign::Feature", "Feature2")
+    feature2.Shape = Part.makeBox(6, 6, 6)
+    body.Tip = feature2
+    doc.recompute()
+    model_objects = MBDCommands.document_model_shape_objects(doc)
+
+    if body not in model_objects:
+        raise AssertionError("Part Design body was excluded from model bounds")
+
+    if feature1 in model_objects or feature2 in model_objects:
+        raise AssertionError(
+            "intermediate Part Design features were included in model bounds"
+        )
+
     FreeCAD.closeDocument(doc.Name)
 
     if abs(base_height - after_height) > 1e-9:
@@ -2653,6 +3087,8 @@ def main():
             "common-datum-export",
             "display-layout-metadata",
             "single-item-fcf-layout",
+            "single-item-datum-feature-layout",
+            "single-item-dimension-layout",
             "global-geometry-link-scope",
             "fcf-rule-validation",
             "dimension-reference-patterns",
@@ -2709,6 +3145,10 @@ def main():
         display_layout_metadata_smoke()
     elif args.mode == "single-item-fcf-layout":
         single_item_fcf_layout_smoke()
+    elif args.mode == "single-item-datum-feature-layout":
+        single_item_datum_feature_layout_smoke()
+    elif args.mode == "single-item-dimension-layout":
+        single_item_dimension_layout_smoke()
     elif args.mode == "global-geometry-link-scope":
         global_geometry_link_scope_smoke()
     elif args.mode == "fcf-rule-validation":

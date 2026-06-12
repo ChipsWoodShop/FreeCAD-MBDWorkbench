@@ -7,6 +7,7 @@ import Part
 
 import MBDBasicDimension
 from MBDPMI import ensure_global_link_property, ensure_pmi_identity
+from MBDViewProvider import ViewProviderSingleItemDimension
 
 
 DIMENSION_PURPOSES = [
@@ -267,31 +268,8 @@ class MBDDimension:
         pass
 
 
-class ViewProviderMBDDimension:
-
-    def __init__(self, vobj):
-        vobj.Proxy = self
-
-    def getIcon(self):
-        return ""
-
-    def attach(self, vobj):
-        pass
-
-    def updateData(self, obj, prop):
-        pass
-
-    def onChanged(self, vobj, prop):
-        pass
-
-    def getDisplayModes(self, obj):
-        return []
-
-    def getDefaultDisplayMode(self):
-        return "Flat Lines"
-
-    def setDisplayMode(self, mode):
-        return mode
+class ViewProviderMBDDimension(ViewProviderSingleItemDimension):
+    pass
 
 
 def measured_value_from_references(obj):
@@ -1027,6 +1005,7 @@ def cylinder_size_measurement(dimension_kind, cylinder):
 
     result = good_measurement(value, p1, p2, pattern)
     result["text_normal"] = axis
+    result["display_direction"] = cylinder.get("opening_direction")
 
     return result
 
@@ -1201,15 +1180,28 @@ def measurement_from_references(
     )
 
 
-def update_dimension_signature(obj):
-    measured = measured_value_from_references(obj)
+def update_dimension_signature(obj, measurement=None):
+    if measurement is None:
+        measurement = measurement_from_references(
+            obj.DimensionKind,
+            obj.MeasurementType,
+            obj.ReferenceObject1,
+            obj.ReferenceSubelement1,
+            obj.ReferenceObject2,
+            obj.ReferenceSubelement2
+        )
+
+    measured = measurement.get("value")
 
     if measured is None:
         obj.GeometrySignatureValid = False
         return
 
     obj.MeasuredValue = measured
-    p1, p2 = display_points_from_references(obj)
+    obj.ReferencePattern = measurement.get("pattern", "")
+    obj.ValidationMessage = measurement.get("message", "")
+    p1 = measurement.get("point1")
+    p2 = measurement.get("point2")
 
     signature = {
         "DimensionPurpose": str(obj.DimensionPurpose),

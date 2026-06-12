@@ -3,7 +3,12 @@
 import FreeCAD
 import json
 
-from MBDPMI import ensure_global_link_property, ensure_pmi_identity
+from MBDPMI import (
+    ensure_global_link_property,
+    ensure_pmi_display_layout,
+    ensure_pmi_identity,
+)
+from MBDViewProvider import ViewProviderSingleItemDatumFeature
 
 class MBDDatumFeature:
     """
@@ -138,35 +143,14 @@ class MBDDatumFeature:
             "Whether current referenced geometry matches stored signature"
         )
         obj.GeometrySignatureValid = True
+        ensure_pmi_display_layout(obj)
         ensure_pmi_identity(obj, "datum-created")
     def execute(self, obj):
         pass
 
 
-class ViewProviderMBDDatumFeature:
-    def __init__(self, vobj):
-        vobj.Proxy = self
-
-    def getIcon(self):
-        return ""
-
-    def attach(self, vobj):
-        pass
-
-    def updateData(self, obj, prop):
-        pass
-
-    def onChanged(self, vobj, prop):
-        pass
-
-    def getDisplayModes(self, obj):
-        return []
-
-    def getDefaultDisplayMode(self):
-        return "Flat Lines"
-
-    def setDisplayMode(self, mode):
-	    return mode
+class ViewProviderMBDDatumFeature(ViewProviderSingleItemDatumFeature):
+    pass
 
 def update_geometry_signature(obj):
 

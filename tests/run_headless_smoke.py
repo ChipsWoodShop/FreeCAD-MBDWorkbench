@@ -77,6 +77,8 @@ def main():
             "common-datum-export",
             "display-layout-metadata",
             "single-item-fcf-layout",
+            "single-item-datum-feature-layout",
+            "single-item-dimension-layout",
             "global-geometry-link-scope",
             "fcf-rule-validation",
             "dimension-reference-patterns",

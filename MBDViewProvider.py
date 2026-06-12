@@ -1,4 +1,5 @@
 import math
+import time
 
 import FreeCAD
 import FreeCADGui
@@ -6,6 +7,7 @@ from pivy import coin
 from PySide import QtCore, QtGui
 
 from MBDDatumSystem import datum_compartment_label, datum_system_compartments
+from MBDPMI import ensure_pmi_display_layout
 
 
 TEXT_WIDTH_FACTOR = 0.62
@@ -247,6 +249,80 @@ def fcf_attachment_point(obj):
         return None
 
 
+def fcf_leader_segments(obj, attachment, origin, height):
+    try:
+        for candidate in obj.Document.Objects:
+            if not hasattr(candidate, "DimensionKind"):
+                continue
+
+            if str(candidate.DimensionKind) != "Diameter":
+                continue
+
+            for object_property, subelement_property in (
+                ("ReferenceObject1", "ReferenceSubelement1"),
+                ("ReferenceObject2", "ReferenceSubelement2"),
+            ):
+                if (
+                    getattr(candidate, object_property, None)
+                    == getattr(obj, "ControlledObject", None)
+                    and getattr(candidate, subelement_property, "")
+                    == getattr(obj, "ControlledSubelement", "")
+                ):
+                    return []
+    except Exception:
+        pass
+
+    leader_segments = [(attachment, origin)]
+
+    if str(getattr(obj, "ToleranceType", "")) != "Position":
+        return leader_segments
+
+    controlled = getattr(obj, "ControlledObject", None)
+    subelement = getattr(obj, "ControlledSubelement", "")
+
+    try:
+        from MBDDimension import cylindrical_face_reference
+
+        cylinder = cylindrical_face_reference(controlled, subelement)
+        opening_direction = cylinder.get("opening_direction")
+
+        if (
+            opening_direction is None
+            or opening_direction.Length <= 1e-9
+        ):
+            return leader_segments
+
+        opening_direction = FreeCAD.Vector(opening_direction)
+        opening_direction.normalize()
+        distance = max(
+            (origin - attachment).dot(opening_direction),
+            height * 2.0
+        )
+        elbow = attachment + opening_direction * distance
+        leader_segments = [(attachment, elbow)]
+
+        if (origin - elbow).Length > 1e-9:
+            leader_segments.append((elbow, origin))
+    except Exception:
+        pass
+
+    return leader_segments
+
+
+def referenced_attachment_point(obj):
+    referenced = getattr(obj, "ReferencedObject", None)
+    subelement = getattr(obj, "ReferencedSubelement", "")
+
+    if referenced is None or not subelement:
+        return None
+
+    try:
+        target = referenced.Shape.getElement(subelement)
+        return FreeCAD.Vector(target.CenterOfMass)
+    except Exception:
+        return None
+
+
 def dragged_annotation_origin(initial_origin, x_axis, y_axis, translation):
     return (
         FreeCAD.Vector(initial_origin)
@@ -266,10 +342,27 @@ def make_selection_node():
 
 class ViewProviderSingleItemFCF:
 
-    def __init__(self, vobj):
+    def __init__(self, vobj, suspend_rebuild=False):
+        timing_started = time.perf_counter()
         self.Object = vobj.Object
         self._initialize_runtime_state()
+        self._suspend_rebuild = bool(
+            suspend_rebuild
+            or getattr(self, "_suspend_rebuild", False)
+        )
+        timing_initialized = time.perf_counter()
         vobj.Proxy = self
+        timing_proxy_assigned = time.perf_counter()
+
+        if timing_proxy_assigned - timing_started > 1.0:
+            FreeCAD.Console.PrintMessage(
+                "Annotation provider constructor for {}: initialize {:.3f}s, "
+                "proxy assignment {:.3f}s\n".format(
+                    self.Object.Name,
+                    timing_initialized - timing_started,
+                    timing_proxy_assigned - timing_initialized
+                )
+            )
 
     def _initialize_runtime_state(self):
         self.root = None
@@ -341,16 +434,25 @@ class ViewProviderSingleItemFCF:
             return False
 
     def attach(self, vobj):
+        timing_started = time.perf_counter()
         self._ensure_runtime_state()
         self.Object = vobj.Object
+        ensure_pmi_display_layout(self.Object)
+
+        if float(self.Object.AnnotationTextHeight) <= 0:
+            self.Object.AnnotationTextHeight = 3.0
+
+        timing_layout_ready = time.perf_counter()
         self.root = make_selection_node()
         self.uses_selection_display_mode = self.root is not None
+        timing_selection_ready = time.perf_counter()
 
         if self.root is None:
             self.root = coin.SoSeparator()
 
         self.geometry = coin.SoSeparator()
         self.root.addChild(self.geometry)
+        timing_graph_ready = time.perf_counter()
 
         if self.uses_selection_display_mode:
             vobj.addDisplayMode(self.root, ANNOTATION_DISPLAY_MODE)
@@ -362,8 +464,24 @@ class ViewProviderSingleItemFCF:
         else:
             vobj.RootNode.addChild(self.root)
 
-        self.ensure_direct_interaction(vobj, verbose=False)
-        self.rebuild()
+        timing_mode_ready = time.perf_counter()
+        if not getattr(self, "_suspend_rebuild", False):
+            self.rebuild()
+        timing_rebuilt = time.perf_counter()
+
+        if timing_rebuilt - timing_started > 1.0:
+            FreeCAD.Console.PrintMessage(
+                "Annotation attach phases for {}: layout {:.3f}s, "
+                "selection {:.3f}s, graph {:.3f}s, mode {:.3f}s, "
+                "geometry {:.3f}s\n".format(
+                    self.Object.Name,
+                    timing_layout_ready - timing_started,
+                    timing_selection_ready - timing_layout_ready,
+                    timing_graph_ready - timing_selection_ready,
+                    timing_mode_ready - timing_graph_ready,
+                    timing_rebuilt - timing_mode_ready
+                )
+            )
 
     def ensure_direct_interaction(self, vobj, verbose=False):
         self._ensure_runtime_state()
@@ -496,7 +614,9 @@ class ViewProviderSingleItemFCF:
         attachment = fcf_attachment_point(obj)
 
         if attachment is not None:
-            segments.append((attachment, origin))
+            segments.extend(
+                fcf_leader_segments(obj, attachment, origin, height)
+            )
 
         x = 0.0
 
@@ -507,7 +627,7 @@ class ViewProviderSingleItemFCF:
                 symbol = text if kind == "symbol" else "Diameter"
                 symbol_size = height * (0.95 if kind == "symbol" else 0.75)
                 symbol_x = x + padding * 0.5
-                symbol_y = padding * 0.55
+                symbol_y = (frame_height - symbol_size) * 0.5
 
                 for start, end in symbol_segments(symbol):
                     segments.append((
@@ -534,7 +654,7 @@ class ViewProviderSingleItemFCF:
                     x_axis,
                     y_axis,
                     text_x,
-                    padding + height * 0.12
+                    frame_height * 0.5
                 )
                 text_sep = coin.SoSeparator()
                 transform = coin.SoTransform()
@@ -577,6 +697,9 @@ class ViewProviderSingleItemFCF:
         add_line_geometry(self.geometry, segments)
 
     def updateData(self, obj, prop):
+        if getattr(self, "_suspend_rebuild", False):
+            return
+
         if prop in {
             "ToleranceType",
             "ToleranceValue",
@@ -672,6 +795,18 @@ class ViewProviderSingleItemFCF:
         if self.direct_view is None:
             return False
 
+        try:
+            preselection = FreeCADGui.Selection.getPreselection()
+            preselected_object = getattr(preselection, "Object", None)
+
+            if (
+                preselected_object is not None
+                and preselected_object != self.Object
+            ):
+                return False
+        except Exception:
+            pass
+
         position = event.getPosition()
         info = self.direct_view.getObjectInfo((
             int(position[0]),
@@ -699,18 +834,6 @@ class ViewProviderSingleItemFCF:
         if matches:
             self.direct_hit_warning_reported = False
             return True
-
-        if not self.direct_hit_warning_reported:
-            FreeCAD.Console.PrintWarning(
-                "Direct annotation click for {} resolved to Object={!r}, "
-                "ParentObject={!r}, SubName={!r}.\n".format(
-                    self.Object.Name,
-                    object_name,
-                    parent_name,
-                    sub_name
-                )
-            )
-            self.direct_hit_warning_reported = True
 
         return False
 
@@ -1059,6 +1182,372 @@ class ViewProviderSingleItemDatumTarget(ViewProviderSingleItemFCF):
         if prop in {
             "TargetId",
             "TargetPoint",
+            "AnnotationOrigin",
+            "AnnotationNormal",
+            "AnnotationDirection",
+            "AnnotationTextHeight",
+        }:
+            self.rebuild()
+
+
+class ViewProviderSingleItemDatumFeature(ViewProviderSingleItemFCF):
+
+    def rebuild(self):
+        if self.geometry is None or self.Object is None:
+            return
+
+        obj = self.Object
+        self.geometry.removeAllChildren()
+        attachment = referenced_attachment_point(obj)
+
+        if attachment is None:
+            return
+
+        origin = FreeCAD.Vector(obj.AnnotationOrigin)
+        height = max(float(obj.AnnotationTextHeight), 1.0)
+        x_axis, y_axis, normal = annotation_basis(obj)
+        triangle_length = height * 1.2
+        triangle_width = height * 0.9
+        box_padding = height * 0.25
+        box_height = height + box_padding * 2.0
+        label = str(getattr(obj, "DatumLabel", ""))
+        box_width = max(
+            len(label) * height * TEXT_WIDTH_FACTOR,
+            height
+        ) + box_padding * 2.0
+        apex = attachment + x_axis * triangle_length
+        leader_end = origin
+        box_points = [
+            local_point(origin, x_axis, y_axis, 0, 0),
+            local_point(origin, x_axis, y_axis, box_width, 0),
+            local_point(origin, x_axis, y_axis, box_width, box_height),
+            local_point(origin, x_axis, y_axis, 0, box_height),
+            local_point(origin, x_axis, y_axis, 0, 0),
+        ]
+        segments = [
+            (
+                attachment - y_axis * (triangle_width * 0.5),
+                attachment + y_axis * (triangle_width * 0.5)
+            ),
+            (
+                attachment + y_axis * (triangle_width * 0.5),
+                apex
+            ),
+            (
+                apex,
+                attachment - y_axis * (triangle_width * 0.5)
+            ),
+            (apex, leader_end),
+        ]
+        segments.extend(zip(box_points, box_points[1:]))
+
+        material = coin.SoMaterial()
+        material.diffuseColor.setValue(1.0, 1.0, 1.0)
+        draw_style = coin.SoDrawStyle()
+        draw_style.lineWidth = 1.0
+        self.geometry.addChild(material)
+        self.geometry.addChild(draw_style)
+        add_line_geometry(self.geometry, segments)
+        text_width = len(label) * height * TEXT_WIDTH_FACTOR
+        text_origin = local_point(
+            origin,
+            x_axis,
+            y_axis,
+            max((box_width - text_width) * 0.5, box_padding),
+            box_height * 0.5
+        )
+        add_world_text(
+            self.geometry,
+            text_origin,
+            label,
+            height,
+            x_axis,
+            y_axis,
+            normal
+        )
+
+    def updateData(self, obj, prop):
+        if prop in {
+            "DatumLabel",
+            "ReferencedObject",
+            "ReferencedSubelement",
+            "AnnotationOrigin",
+            "AnnotationNormal",
+            "AnnotationDirection",
+            "AnnotationTextHeight",
+        }:
+            self.rebuild()
+
+
+def dimension_display_data(obj):
+    if hasattr(obj, "DimensionKind"):
+        from MBDDimension import dimension_display_label, measurement_from_references
+
+        measurement = measurement_from_references(
+            obj.DimensionKind,
+            obj.MeasurementType,
+            obj.ReferenceObject1,
+            obj.ReferenceSubelement1,
+            obj.ReferenceObject2,
+            obj.ReferenceSubelement2
+        )
+        return {
+            "kind": str(obj.DimensionKind),
+            "label": dimension_display_label(obj),
+            "point1": measurement.get("point1"),
+            "point2": measurement.get("point2"),
+            "boxed": str(obj.DimensionPurpose) == "Basic",
+        }
+
+    from MBDBasicDimension import display_points_from_references
+
+    point1, point2 = display_points_from_references(
+        obj.ReferenceObject1,
+        obj.ReferenceSubelement1,
+        obj.ReferenceObject2,
+        obj.ReferenceSubelement2
+    )
+    return {
+        "kind": "Linear",
+        "label": FreeCAD.Units.Quantity(
+            obj.NominalValue,
+            FreeCAD.Units.Length
+        ).UserString,
+        "point1": point1,
+        "point2": point2,
+        "boxed": True,
+    }
+
+
+def arrow_segments(tip, direction, side, length, width):
+    arrow_direction = FreeCAD.Vector(direction)
+    side_direction = FreeCAD.Vector(side)
+
+    if arrow_direction.Length <= 1e-9 or side_direction.Length <= 1e-9:
+        return []
+
+    arrow_direction.normalize()
+    side_direction.normalize()
+    base = tip + arrow_direction * length
+    half_width = side_direction * (width * 0.5)
+    return [
+        (tip, base + half_width),
+        (tip, base - half_width),
+    ]
+
+
+def add_world_text(parent, origin, text, height, x_axis, y_axis, normal):
+    transform = coin.SoTransform()
+    transform.translation.setValue(origin.x, origin.y, origin.z)
+    rotation = FreeCAD.Rotation(x_axis, y_axis, normal, "XYZ")
+    quaternion = rotation.Q
+    transform.rotation.setValue(
+        quaternion[0],
+        quaternion[1],
+        quaternion[2],
+        quaternion[3]
+    )
+    font_style = coin.SoVRMLFontStyle()
+    font_style.size = height * 0.85
+    font_style.justify.setValues(0, 2, ["BEGIN", "MIDDLE"])
+    text_node = coin.SoVRMLText()
+    text_node.string = str(text)
+    text_node.fontStyle = font_style
+    separator = coin.SoSeparator()
+    separator.addChild(transform)
+    separator.addChild(text_node)
+    parent.addChild(separator)
+
+
+class ViewProviderSingleItemDimension(ViewProviderSingleItemFCF):
+
+    def __init__(
+        self,
+        vobj,
+        resolved_display_data=None,
+        suspend_rebuild=False
+    ):
+        self._resolved_display_data = resolved_display_data
+        self._suspend_rebuild = bool(suspend_rebuild)
+        super().__init__(vobj)
+
+    def rebuild(self):
+        if self.geometry is None or self.Object is None:
+            return
+
+        obj = self.Object
+        self.geometry.removeAllChildren()
+        data = getattr(self, "_resolved_display_data", None)
+
+        if data is None:
+            data = dimension_display_data(obj)
+        else:
+            self._resolved_display_data = None
+
+        point1 = data["point1"]
+        point2 = data["point2"]
+
+        if point1 is None or point2 is None:
+            return
+
+        origin = FreeCAD.Vector(obj.AnnotationOrigin)
+        height = max(float(obj.AnnotationTextHeight), 1.0)
+        x_axis, y_axis, normal = annotation_basis(obj)
+        measured = point2 - point1
+
+        if measured.Length <= 1e-9:
+            return
+
+        measured.normalize()
+
+        if x_axis.dot(measured) < 0:
+            x_axis = x_axis.negative()
+            y_axis = y_axis.negative()
+
+        segments = []
+        arrow_length = height * 1.3
+        arrow_width = height * 0.45
+        text_origin = origin
+        text_width = max(
+            len(data["label"]) * height * TEXT_WIDTH_FACTOR,
+            height * 2.0
+        )
+
+        if data["kind"] == "Radius":
+            surface_point = point2
+            leader_direction = origin - surface_point
+
+            if leader_direction.Length <= 1e-9:
+                leader_direction = point2 - point1
+
+            leader_direction.normalize()
+            segments.append((surface_point, origin))
+            segments.extend(arrow_segments(
+                surface_point,
+                leader_direction,
+                y_axis,
+                arrow_length,
+                arrow_width
+            ))
+        else:
+            line_point1 = origin + x_axis * (point1 - origin).dot(x_axis)
+            line_point2 = origin + x_axis * (point2 - origin).dot(x_axis)
+            extension1 = line_point1 - point1
+            extension2 = line_point2 - point2
+            gap = height * 0.7
+            overshoot = height * 0.8
+
+            if extension1.Length > 1e-9:
+                direction1 = FreeCAD.Vector(extension1)
+                direction1.normalize()
+                segments.append((
+                    point1 + direction1 * gap,
+                    line_point1 + direction1 * overshoot
+                ))
+
+            if extension2.Length > 1e-9:
+                direction2 = FreeCAD.Vector(extension2)
+                direction2.normalize()
+                segments.append((
+                    point2 + direction2 * gap,
+                    line_point2 + direction2 * overshoot
+                ))
+
+            segments.append((line_point1, line_point2))
+            line_direction = line_point2 - line_point1
+
+            if line_direction.Length > 1e-9:
+                line_direction.normalize()
+                segments.extend(arrow_segments(
+                    line_point1,
+                    line_direction,
+                    y_axis,
+                    arrow_length,
+                    arrow_width
+                ))
+                segments.extend(arrow_segments(
+                    line_point2,
+                    line_direction.negative(),
+                    y_axis,
+                    arrow_length,
+                    arrow_width
+                ))
+
+        if data["boxed"]:
+            padding = height * 0.35
+            box_points = [
+                local_point(text_origin, x_axis, y_axis, -padding, -padding),
+                local_point(
+                    text_origin, x_axis, y_axis,
+                    text_width + padding, -padding
+                ),
+                local_point(
+                    text_origin, x_axis, y_axis,
+                    text_width + padding, height + padding
+                ),
+                local_point(
+                    text_origin, x_axis, y_axis,
+                    -padding, height + padding
+                ),
+                local_point(text_origin, x_axis, y_axis, -padding, -padding),
+            ]
+            segments.extend(zip(box_points, box_points[1:]))
+
+        if data["kind"] == "Diameter":
+            symbol_size = height * 0.85
+
+            for start, end in symbol_segments("Diameter"):
+                segments.append((
+                    local_point(
+                        text_origin, x_axis, y_axis,
+                        start[0] * symbol_size,
+                        start[1] * symbol_size
+                    ),
+                    local_point(
+                        text_origin, x_axis, y_axis,
+                        end[0] * symbol_size,
+                        end[1] * symbol_size
+                    )
+                ))
+
+            text_origin = text_origin + x_axis * (height * 1.15)
+            text_origin = text_origin + y_axis * (symbol_size * 0.5)
+
+        material = coin.SoMaterial()
+        material.diffuseColor.setValue(1.0, 1.0, 1.0)
+        draw_style = coin.SoDrawStyle()
+        draw_style.lineWidth = 1.0
+        self.geometry.addChild(material)
+        self.geometry.addChild(draw_style)
+        add_line_geometry(self.geometry, segments)
+        add_world_text(
+            self.geometry,
+            text_origin,
+            data["label"],
+            height,
+            x_axis,
+            y_axis,
+            normal
+        )
+
+    def updateData(self, obj, prop):
+        if getattr(self, "_suspend_rebuild", False):
+            return
+
+        if prop in {
+            "DimensionPurpose",
+            "DimensionKind",
+            "DimensionType",
+            "MeasurementType",
+            "NominalValue",
+            "UpperTolerance",
+            "LowerTolerance",
+            "UpperLimit",
+            "LowerLimit",
+            "ReferenceObject1",
+            "ReferenceSubelement1",
+            "ReferenceObject2",
+            "ReferenceSubelement2",
             "AnnotationOrigin",
             "AnnotationNormal",
             "AnnotationDirection",
