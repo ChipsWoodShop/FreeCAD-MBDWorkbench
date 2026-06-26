@@ -43,6 +43,8 @@ from MBDPMI import append_pmi_history, update_pmi_display_layout
 from MBDDatumTarget import (
     MBDDatumTarget,
     ViewProviderMBDDatumTarget,
+    straight_edge_geometry,
+    target_surface_distance,
     update_datum_target_signature
 )
 from MBDDatumSystem import (
@@ -3973,7 +3975,7 @@ class CreateDatumTargetCommand:
     def GetResources(self):
         return {
             "MenuText": "Create Datum Target",
-            "ToolTip": "Create a semantic datum target from a datum and construction point",
+            "ToolTip": "Create a semantic point or line datum target",
             "Pixmap": command_icon("create_datum_target.svg")
         }
 
@@ -3988,7 +3990,7 @@ class CreateDatumTargetCommand:
             QtGui.QMessageBox.warning(
                 None,
                 "Datum Target",
-                "Select one MBD datum feature and one construction point."
+                "Select one MBD datum feature and one construction point or straight edge."
             )
             return
 
@@ -4005,7 +4007,7 @@ class CreateDatumTargetCommand:
             QtGui.QMessageBox.warning(
                 None,
                 "Datum Target",
-                "Selection must include one MBD datum feature and one construction point."
+                "Selection must include one MBD datum feature and one construction point or straight edge."
             )
             return
 
@@ -4047,17 +4049,81 @@ class CreateDatumTargetCommand:
         MBDDatumTarget(target_obj)
 
         target_obj.TargetId = target_id
-        target_obj.TargetType = "Point"
         target_obj.ParentDatum = parent_datum
         target_obj.ConstructionObject = construction_selection.Object
 
         if construction_selection.SubElementNames:
             target_obj.ConstructionSubelement = construction_selection.SubElementNames[0]
 
+        selected_shape = None
+
+        try:
+            if target_obj.ConstructionSubelement:
+                selected_shape = construction_selection.Object.Shape.getElement(
+                    target_obj.ConstructionSubelement
+                )
+            else:
+                selected_shape = construction_selection.Object.Shape
+        except Exception:
+            pass
+
+        line_geometry = None
+
+        if getattr(selected_shape, "ShapeType", "") == "Edge":
+            line_geometry = straight_edge_geometry(selected_shape)
+        elif selected_shape is not None:
+            try:
+                if len(selected_shape.Edges) == 1:
+                    line_geometry = straight_edge_geometry(
+                        selected_shape.Edges[0]
+                    )
+            except Exception:
+                pass
+
+        if getattr(selected_shape, "ShapeType", "") == "Edge" and line_geometry is None:
+            doc.removeObject(target_obj.Name)
+            QtGui.QMessageBox.warning(
+                None,
+                "Datum Target",
+                "A line datum target requires a straight construction edge."
+            )
+            return
+
+        target_obj.TargetType = "Line" if line_geometry else "Point"
         target_obj.ReferencedObject = parent_datum.ReferencedObject
         target_obj.ReferencedSubelement = parent_datum.ReferencedSubelement
 
         update_datum_target_signature(target_obj)
+
+        if not target_obj.GeometrySignatureValid:
+            doc.removeObject(target_obj.Name)
+            QtGui.QMessageBox.warning(
+                None,
+                "Datum Target",
+                "The selected construction reference does not resolve to a supported point or straight line."
+            )
+            return
+
+        if str(target_obj.TargetType) == "Line":
+            distance = target_surface_distance(target_obj)
+
+            if (
+                distance is None
+                or distance > float(target_obj.SurfaceTolerance)
+            ):
+                doc.removeObject(target_obj.Name)
+                QtGui.QMessageBox.warning(
+                    None,
+                    "Datum Target",
+                    "A line datum target must lie on the parent datum face. "
+                    "The selected line is {:.6f} mm from {}.{}.".format(
+                        distance if distance is not None else 0.0,
+                        parent_datum.ReferencedObject.Name,
+                        parent_datum.ReferencedSubelement
+                    )
+                )
+                return
+
         append_pmi_history(target_obj, "datum-target-attached")
         add_to_mbd_pmi_group(doc, target_obj)
 
@@ -4068,7 +4134,8 @@ class CreateDatumTargetCommand:
         doc.recompute()
 
         FreeCAD.Console.PrintMessage(
-            "Created datum target {} for datum {} using {}\n".format(
+            "Created {} datum target {} for datum {} using {}\n".format(
+                str(target_obj.TargetType).lower(),
                 target_id,
                 parent_datum.DatumLabel,
                 construction_selection.Object.Name

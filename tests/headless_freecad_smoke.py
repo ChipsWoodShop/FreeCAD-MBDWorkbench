@@ -374,6 +374,15 @@ def dimension_export_smoke(output_path):
     if not exists or size <= 0:
         raise AssertionError("dimension export did not create a non-empty STEP file")
 
+    with open(output_path, "r", encoding="utf-8", errors="replace") as handle:
+        step_text = handle.read().upper()
+
+    if "DIMENSIONAL_SIZE" not in step_text or "'RADIUS'" not in step_text:
+        raise AssertionError("dimension export did not write a radius dimensional size")
+
+    if "/*   NUL REF   */" in step_text:
+        raise AssertionError("dimension export wrote a null semantic reference")
+
     print("semantic dimension export passed:", output_path, size)
 
 
@@ -420,6 +429,100 @@ def datum_target_export_smoke(output_path):
     print("semantic datum target export passed:", output_path, size)
 
 
+def line_datum_target_export_smoke(output_path):
+    MBDExporter.QtGui.QMessageBox = AcceptMessageBox
+
+    doc, box_obj = make_doc("MBDLineDatumTargetExportSmoke")
+    datum_a, _datum_b, _datum_c, datum_system = make_datum_set(doc, box_obj)
+    add_position_fcf(doc, box_obj, datum_system, False, "Face1")
+
+    line = doc.addObject("Part::Feature", "DatumTargetLineA1")
+    line.Shape = Part.makeLine(
+        FreeCAD.Vector(0, 5, 10),
+        FreeCAD.Vector(0, 15, 10)
+    )
+    doc.recompute()
+
+    target = doc.addObject(
+        "App::DocumentObjectGroupPython",
+        "MBD_DatumTarget_A1"
+    )
+    MBDDatumTarget.MBDDatumTarget(target)
+    target.TargetId = "A1"
+    target.TargetType = "Line"
+    target.ParentDatum = datum_a
+    target.ConstructionObject = line
+    target.ReferencedObject = box_obj
+    target.ReferencedSubelement = "Face1"
+    MBDDatumTarget.update_datum_target_signature(target)
+    doc.recompute()
+
+    errors = MBDValidation.validate_datum_target(target)
+
+    if errors:
+        FreeCAD.closeDocument(doc.Name)
+        raise AssertionError(
+            "line datum target validation failed: {}".format(errors)
+        )
+
+    if abs(float(target.TargetLength) - 10.0) > 1e-6:
+        FreeCAD.closeDocument(doc.Name)
+        raise AssertionError(
+            "line datum target length was {}".format(target.TargetLength)
+        )
+
+    line.Shape = Part.makeLine(
+        FreeCAD.Vector(0, 5, 10),
+        FreeCAD.Vector(0, 25, 10)
+    )
+    off_surface_errors = MBDValidation.validate_datum_target(target)
+
+    if not any("target line is 5.000000 mm" in error for error in off_surface_errors):
+        FreeCAD.closeDocument(doc.Name)
+        raise AssertionError(
+            "off-surface line target was not rejected: {}".format(
+                off_surface_errors
+            )
+        )
+
+    line.Shape = Part.makeLine(
+        FreeCAD.Vector(0, 5, 10),
+        FreeCAD.Vector(0, 15, 10)
+    )
+    MBDDatumTarget.update_datum_target_signature(target)
+
+    if os.path.exists(output_path):
+        os.remove(output_path)
+
+    result = MBDExporter.export_ap242(output_path)
+    exists = os.path.exists(output_path)
+    size = os.path.getsize(output_path) if exists else 0
+
+    if result is not True:
+        FreeCAD.closeDocument(doc.Name)
+        raise AssertionError(
+            "line datum target export returned {}".format(result)
+        )
+
+    if not exists or size <= 0:
+        FreeCAD.closeDocument(doc.Name)
+        raise AssertionError(
+            "line datum target export did not create a non-empty STEP file"
+        )
+
+    with open(output_path, "r", encoding="utf-8", errors="replace") as handle:
+        step_text = handle.read().upper()
+
+    FreeCAD.closeDocument(doc.Name)
+
+    if "PLACED_DATUM_TARGET_FEATURE('','LINE'" not in step_text:
+        raise AssertionError(
+            "line datum target export did not write a line target"
+        )
+
+    print("semantic line datum target export passed:", output_path, size)
+
+
 def datum_target_sufficiency_smoke():
     doc, box_obj = make_doc("MBDDatumTargetSufficiencySmoke")
     datum_a, datum_b, _datum_c, _datum_system = make_datum_set(doc, box_obj)
@@ -458,11 +561,18 @@ def datum_target_sufficiency_smoke():
         raise AssertionError("underdefined primary datum targets were not rejected")
 
     add_target(datum_a, "A3", FreeCAD.Vector(0, 20, 0))
+    collinear_primary = messages()
+
+    if not any("collinear" in message for message in collinear_primary):
+        FreeCAD.closeDocument(doc.Name)
+        raise AssertionError("collinear primary datum targets were not rejected")
+
+    add_target(datum_a, "A4", FreeCAD.Vector(0, 10, 10))
     primary_complete = messages()
 
     if any("primary datum A" in message for message in primary_complete):
         FreeCAD.closeDocument(doc.Name)
-        raise AssertionError("three primary datum targets did not clear validation")
+        raise AssertionError("non-collinear primary datum targets did not clear validation")
 
     add_target(datum_b, "B1", FreeCAD.Vector(10, 0, 0))
     underdefined_secondary = messages()
@@ -471,7 +581,14 @@ def datum_target_sufficiency_smoke():
         FreeCAD.closeDocument(doc.Name)
         raise AssertionError("underdefined secondary datum targets were not rejected")
 
-    add_target(datum_b, "B2", FreeCAD.Vector(10, 20, 0))
+    add_target(datum_b, "B2", FreeCAD.Vector(10, 0, 0))
+    duplicate_secondary = messages()
+
+    if not any("secondary datum B" in message for message in duplicate_secondary):
+        FreeCAD.closeDocument(doc.Name)
+        raise AssertionError("duplicate secondary datum targets were not rejected")
+
+    add_target(datum_b, "B3", FreeCAD.Vector(10, 20, 0))
     secondary_complete = messages()
     FreeCAD.closeDocument(doc.Name)
 
@@ -481,6 +598,104 @@ def datum_target_sufficiency_smoke():
     FreeCAD.Console.PrintMessage(
         "datum target sufficiency validation passed\n"
     )
+
+
+def mixed_datum_target_sufficiency_smoke():
+    doc, box_obj = make_doc("MBDMixedDatumTargetSufficiencySmoke")
+    datum_a, datum_b, _datum_c, datum_system = make_datum_set(doc, box_obj)
+
+    def add_point_target(datum, target_id, point):
+        construction = doc.addObject(
+            "Part::Feature",
+            "Construction_" + target_id
+        )
+        construction.Shape = Part.Vertex(point)
+        target = doc.addObject(
+            "App::DocumentObjectGroupPython",
+            "MBD_DatumTarget_" + target_id
+        )
+        MBDDatumTarget.MBDDatumTarget(target)
+        target.TargetId = target_id
+        target.TargetType = "Point"
+        target.ParentDatum = datum
+        target.ConstructionObject = construction
+        target.ReferencedObject = box_obj
+        target.ReferencedSubelement = datum.ReferencedSubelement
+        target.SurfaceTolerance = 999.0
+        MBDDatumTarget.update_datum_target_signature(target)
+        return target
+
+    def add_line_target(datum, target_id, start, end):
+        construction = doc.addObject(
+            "Part::Feature",
+            "Construction_" + target_id
+        )
+        construction.Shape = Part.makeLine(start, end)
+        target = doc.addObject(
+            "App::DocumentObjectGroupPython",
+            "MBD_DatumTarget_" + target_id
+        )
+        MBDDatumTarget.MBDDatumTarget(target)
+        target.TargetId = target_id
+        target.TargetType = "Line"
+        target.ParentDatum = datum
+        target.ConstructionObject = construction
+        target.ReferencedObject = box_obj
+        target.ReferencedSubelement = datum.ReferencedSubelement
+        target.SurfaceTolerance = 999.0
+        MBDDatumTarget.update_datum_target_signature(target)
+        return target
+
+    def messages():
+        return MBDValidation.validate_datum_system_target_sufficiency(
+            doc,
+            datum_system
+        )
+
+    add_line_target(
+        datum_a,
+        "A1",
+        FreeCAD.Vector(0, 5, 5),
+        FreeCAD.Vector(0, 15, 5)
+    )
+
+    if not any("primary datum A" in message for message in messages()):
+        FreeCAD.closeDocument(doc.Name)
+        raise AssertionError(
+            "one primary line target was not reported as underdefined"
+        )
+
+    add_point_target(datum_a, "A2", FreeCAD.Vector(0, 10, 5))
+
+    if not any("collinear" in message for message in messages()):
+        FreeCAD.closeDocument(doc.Name)
+        raise AssertionError(
+            "primary line plus collinear point target was not rejected"
+        )
+
+    add_point_target(datum_a, "A3", FreeCAD.Vector(0, 15, 20))
+
+    if any("primary datum A" in message for message in messages()):
+        FreeCAD.closeDocument(doc.Name)
+        raise AssertionError(
+            "primary line-plus-point targets did not clear validation"
+        )
+
+    add_line_target(
+        datum_b,
+        "B1",
+        FreeCAD.Vector(5, 0, 5),
+        FreeCAD.Vector(9, 0, 5)
+    )
+
+    if any("secondary datum B" in message for message in messages()):
+        FreeCAD.closeDocument(doc.Name)
+        raise AssertionError(
+            "one secondary line target did not clear validation"
+        )
+
+    FreeCAD.closeDocument(doc.Name)
+    print("mixed datum target sufficiency validation passed")
 
 
 def common_datum_system_validation_smoke():
@@ -1022,6 +1237,19 @@ def single_item_fcf_layout_smoke():
 
     if target_view_provider.claimChildren():
         raise AssertionError("single-item datum target claims helper children")
+
+    target.TargetType = "Line"
+    target.TargetEndPoint1 = FreeCAD.Vector(0, 5, 15)
+    target.TargetEndPoint2 = FreeCAD.Vector(0, 15, 15)
+    target.TargetDirection = FreeCAD.Vector(0, 1, 0)
+    target.TargetLength = 10.0
+    target.TargetPoint = FreeCAD.Vector(0, 10, 15)
+    target_view_provider.rebuild()
+
+    if target_view_provider.geometry.getNumChildren() < 5:
+        raise AssertionError(
+            "single-item line datum target scene graph is incomplete"
+        )
 
     MBDCommands.create_datum_target_display_text(doc, target)
     target_helper_names = [child.Name for child in target.Group]
@@ -3082,7 +3310,9 @@ def main():
             "dimension-semantic-rules",
             "dimension-export",
             "datum-target-export",
+            "line-datum-target-export",
             "datum-target-sufficiency",
+            "mixed-datum-target-sufficiency",
             "common-datum-system-validation",
             "common-datum-export",
             "display-layout-metadata",
@@ -3135,8 +3365,12 @@ def main():
         dimension_export_smoke(args.output)
     elif args.mode == "datum-target-export":
         datum_target_export_smoke(args.output)
+    elif args.mode == "line-datum-target-export":
+        line_datum_target_export_smoke(args.output)
     elif args.mode == "datum-target-sufficiency":
         datum_target_sufficiency_smoke()
+    elif args.mode == "mixed-datum-target-sufficiency":
+        mixed_datum_target_sufficiency_smoke()
     elif args.mode == "common-datum-system-validation":
         common_datum_system_validation_smoke()
     elif args.mode == "common-datum-export":

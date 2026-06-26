@@ -468,18 +468,21 @@ class ViewProviderSingleItemFCF:
         if not getattr(self, "_suspend_rebuild", False):
             self.rebuild()
         timing_rebuilt = time.perf_counter()
+        self.ensure_direct_interaction(vobj, verbose=False)
+        timing_interaction_ready = time.perf_counter()
 
-        if timing_rebuilt - timing_started > 1.0:
+        if timing_interaction_ready - timing_started > 1.0:
             FreeCAD.Console.PrintMessage(
                 "Annotation attach phases for {}: layout {:.3f}s, "
                 "selection {:.3f}s, graph {:.3f}s, mode {:.3f}s, "
-                "geometry {:.3f}s\n".format(
+                "geometry {:.3f}s, interaction {:.3f}s\n".format(
                     self.Object.Name,
                     timing_layout_ready - timing_started,
                     timing_selection_ready - timing_layout_ready,
                     timing_graph_ready - timing_selection_ready,
                     timing_mode_ready - timing_graph_ready,
-                    timing_rebuilt - timing_mode_ready
+                    timing_rebuilt - timing_mode_ready,
+                    timing_interaction_ready - timing_rebuilt
                 )
             )
 
@@ -1109,45 +1112,50 @@ class ViewProviderSingleItemDatumTarget(ViewProviderSingleItemFCF):
         height = max(float(obj.AnnotationTextHeight), 1.0)
         x_axis, y_axis, normal = annotation_basis(obj)
         marker_radius = height * 0.28
-        segments = [
-            (point, origin),
-            (
-                point - x_axis * marker_radius,
-                point + x_axis * marker_radius
-            ),
-            (
-                point - y_axis * marker_radius,
-                point + y_axis * marker_radius
-            ),
-        ]
+        segments = [(point, origin)]
 
-        marker_points = arc_points(
-            0,
-            0,
-            marker_radius,
-            marker_radius,
-            0,
-            360,
-            32
-        )
-
-        for start, end in zip(marker_points, marker_points[1:]):
-            segments.append((
-                local_point(
-                    point,
-                    x_axis,
-                    y_axis,
-                    start[0],
-                    start[1]
+        if str(getattr(obj, "TargetType", "Point")) == "Line":
+            start = FreeCAD.Vector(obj.TargetEndPoint1)
+            end = FreeCAD.Vector(obj.TargetEndPoint2)
+            segments.append((start, end))
+        else:
+            segments.extend([
+                (
+                    point - x_axis * marker_radius,
+                    point + x_axis * marker_radius
                 ),
-                local_point(
-                    point,
-                    x_axis,
-                    y_axis,
-                    end[0],
-                    end[1]
-                )
-            ))
+                (
+                    point - y_axis * marker_radius,
+                    point + y_axis * marker_radius
+                ),
+            ])
+            marker_points = arc_points(
+                0,
+                0,
+                marker_radius,
+                marker_radius,
+                0,
+                360,
+                32
+            )
+
+            for start, end in zip(marker_points, marker_points[1:]):
+                segments.append((
+                    local_point(
+                        point,
+                        x_axis,
+                        y_axis,
+                        start[0],
+                        start[1]
+                    ),
+                    local_point(
+                        point,
+                        x_axis,
+                        y_axis,
+                        end[0],
+                        end[1]
+                    )
+                ))
 
         material = coin.SoMaterial()
         material.diffuseColor.setValue(1.0, 1.0, 1.0)
@@ -1181,7 +1189,10 @@ class ViewProviderSingleItemDatumTarget(ViewProviderSingleItemFCF):
     def updateData(self, obj, prop):
         if prop in {
             "TargetId",
+            "TargetType",
             "TargetPoint",
+            "TargetEndPoint1",
+            "TargetEndPoint2",
             "AnnotationOrigin",
             "AnnotationNormal",
             "AnnotationDirection",

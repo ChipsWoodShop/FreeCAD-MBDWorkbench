@@ -244,30 +244,75 @@ def build_edge_label_map(shape_tool, simple_label):
     return subshape_map
 
 
-def dimension_reference_label(ref_obj, ref_sub, face_label_map):
+def equivalent_face_subname(export_obj, ref_obj, ref_sub):
     if ref_obj is None:
         return None
 
     if hasattr(ref_obj, "DatumLabel"):
         ref_sub = getattr(ref_obj, "ReferencedSubelement", "")
+        ref_obj = getattr(ref_obj, "ReferencedObject", None)
 
     if not ref_sub:
         return None
 
-    return face_label_map.get(ref_sub)
+    if ref_obj is export_obj:
+        return str(ref_sub)
 
-
-def dimension_reference_subname(ref_obj, ref_sub):
-    if ref_obj is None:
+    try:
+        reference_face = ref_obj.Shape.getElement(ref_sub)
+    except Exception:
         return None
 
-    if hasattr(ref_obj, "DatumLabel"):
-        ref_sub = getattr(ref_obj, "ReferencedSubelement", "")
+    try:
+        if hasattr(reference_face, "isSame"):
+            for index, face in enumerate(export_obj.Shape.Faces, start=1):
+                if reference_face.isSame(face):
+                    return "Face{}".format(index)
+    except Exception:
+        pass
 
-    if not ref_sub:
+    try:
+        reference_center = reference_face.CenterOfMass
+        reference_area = float(reference_face.Area)
+    except Exception:
         return None
 
-    return str(ref_sub)
+    best_subname = None
+    best_distance = None
+    area_tolerance = max(abs(reference_area) * 1e-6, 1e-6)
+
+    for index, face in enumerate(export_obj.Shape.Faces, start=1):
+        try:
+            area_delta = abs(float(face.Area) - reference_area)
+
+            if area_delta > area_tolerance:
+                continue
+
+            distance = (face.CenterOfMass - reference_center).Length
+        except Exception:
+            continue
+
+        if best_distance is None or distance < best_distance:
+            best_distance = distance
+            best_subname = "Face{}".format(index)
+
+    if best_distance is not None and best_distance <= 1e-5:
+        return best_subname
+
+    return None
+
+
+def dimension_reference_label(export_obj, ref_obj, ref_sub, face_label_map):
+    subname = equivalent_face_subname(export_obj, ref_obj, ref_sub)
+
+    if not subname:
+        return None
+
+    return face_label_map.get(subname)
+
+
+def dimension_reference_subname(export_obj, ref_obj, ref_sub):
+    return equivalent_face_subname(export_obj, ref_obj, ref_sub)
 
 
 def dimension_type_value(dim_obj):
@@ -624,11 +669,28 @@ def datum_target_axis(target_obj):
 
         if normal.Length <= 1e-9:
             normal = FreeCAD.Vector(0, 0, 1)
+
+        if str(face.Orientation).lower() == "reversed":
+            normal = normal.negative()
     except Exception:
         pass
 
     normal.normalize()
-    reference = perpendicular_reference_direction(normal)
+    if str(target_obj.TargetType) == "Line":
+        line = MBDDatumTarget.line_geometry_from_target(target_obj)
+
+        if line is None:
+            return None
+
+        reference = FreeCAD.Vector(line["direction"])
+        reference = reference - normal * reference.dot(normal)
+
+        if reference.Length <= 1e-9:
+            return None
+
+        reference.normalize()
+    else:
+        reference = perpendicular_reference_direction(normal)
 
     return gp_Ax2(
         vector_to_gp_pnt(point),
@@ -662,11 +724,27 @@ def configure_datum_target(datum_label, target_obj):
     )
     datum_obj.SetPosition(1)
     datum_obj.IsDatumTarget(True)
-    datum_obj.SetDatumTargetType(
-        XDTO.XCAFDimTolObjects_DatumTargetType_Point
+    target_type = str(target_obj.TargetType)
+    target_enum = getattr(
+        XDTO,
+        "XCAFDimTolObjects_DatumTargetType_" + target_type,
+        None
     )
+
+    if target_enum is None:
+        return False
+
+    datum_obj.SetDatumTargetType(target_enum)
     datum_obj.SetDatumTargetAxis(target_axis)
     datum_obj.SetDatumTargetNumber(target_number)
+
+    if target_type == "Line":
+        line = MBDDatumTarget.line_geometry_from_target(target_obj)
+
+        if line is None:
+            return False
+
+        datum_obj.SetDatumTargetLength(float(line["length"]))
 
     datum_attr.SetObject(datum_obj)
     return True
@@ -877,19 +955,55 @@ def export_feature_control_frames(
         )
 
 
-def export_dimensions(doc, dimtol_tool, face_label_map):
+def export_dimensions(doc, dimtol_tool, face_label_map, export_obj):
     pending_location_dimensions = []
+    pending_size_dimensions = []
 
     for dim_obj in iter_semantic_dimensions(doc):
         dimension_type = dimension_type_value(dim_obj)
 
+        if str(getattr(dim_obj, "DimensionKind", "")) == "Radius":
+            first_subname = dimension_reference_subname(
+                export_obj,
+                getattr(dim_obj, "ReferenceObject1", None),
+                getattr(dim_obj, "ReferenceSubelement1", "")
+            )
+
+            if first_subname in face_label_map:
+                pending_size_dimensions.append({
+                    "name": getattr(dim_obj, "Name", ""),
+                    "subname": first_subname,
+                    "kind": "radius",
+                    "nominal": dimension_nominal_value(dim_obj),
+                    "purpose": str(getattr(dim_obj, "DimensionPurpose", "")),
+                    "lower_tolerance": float(getattr(dim_obj, "LowerTolerance", 0.0)),
+                    "upper_tolerance": float(getattr(dim_obj, "UpperTolerance", 0.0)),
+                    "lower_limit": float(getattr(dim_obj, "LowerLimit", 0.0)),
+                    "upper_limit": float(getattr(dim_obj, "UpperLimit", 0.0)),
+                })
+                FreeCAD.Console.PrintMessage(
+                    "Creating semantic radius dimension on {} using AP242 post-write entities\n".format(
+                        dimension_export_attachment_text(dim_obj)
+                    )
+                )
+            else:
+                FreeCAD.Console.PrintWarning(
+                    "Skipping AP242 export for radius dimension on {} because its face could not be mapped.\n".format(
+                        dimension_export_attachment_text(dim_obj)
+                    )
+                )
+
+            continue
+
         if dimension_type is None:
             if dimension_is_linear_location(dim_obj):
                 first_subname = dimension_reference_subname(
+                    export_obj,
                     getattr(dim_obj, "ReferenceObject1", None),
                     getattr(dim_obj, "ReferenceSubelement1", "")
                 )
                 second_subname = dimension_reference_subname(
+                    export_obj,
                     getattr(dim_obj, "ReferenceObject2", None),
                     getattr(dim_obj, "ReferenceSubelement2", "")
                 )
@@ -923,6 +1037,7 @@ def export_dimensions(doc, dimtol_tool, face_label_map):
             continue
 
         first_label = dimension_reference_label(
+            export_obj,
             getattr(dim_obj, "ReferenceObject1", None),
             getattr(dim_obj, "ReferenceSubelement1", ""),
             face_label_map
@@ -940,6 +1055,7 @@ def export_dimensions(doc, dimtol_tool, face_label_map):
 
         if str(getattr(dim_obj, "DimensionKind", "")) == "Linear":
             second_label = dimension_reference_label(
+                export_obj,
                 getattr(dim_obj, "ReferenceObject2", None),
                 getattr(dim_obj, "ReferenceSubelement2", ""),
                 face_label_map
@@ -989,7 +1105,7 @@ def export_dimensions(doc, dimtol_tool, face_label_map):
                 dim_label
             )
 
-    return pending_location_dimensions
+    return pending_location_dimensions, pending_size_dimensions
 
 
 def link_datums_to_geom_tolerance(
@@ -1307,20 +1423,24 @@ def step_float(value):
 
 
 def location_dimension_measure_items(location_dim, unit_id, first_id):
-    purpose = location_dim["purpose"]
+    return dimension_measure_items(location_dim, unit_id, first_id)
+
+
+def dimension_measure_items(dimension_data, unit_id, first_id):
+    purpose = dimension_data["purpose"]
     entity_id = first_id
     item_ids = []
     lines = []
 
     if purpose == "Limits":
         values = [
-            ("nominal value", location_dim["nominal"]),
-            ("lower limit", location_dim["lower_limit"]),
-            ("upper limit", location_dim["upper_limit"]),
+            ("nominal value", dimension_data["nominal"]),
+            ("lower limit", dimension_data["lower_limit"]),
+            ("upper limit", dimension_data["upper_limit"]),
         ]
     else:
         values = [
-            ("nominal value", location_dim["nominal"]),
+            ("nominal value", dimension_data["nominal"]),
         ]
 
     for label, value in values:
@@ -1338,6 +1458,147 @@ def location_dimension_measure_items(location_dim, unit_id, first_id):
         entity_id += 1
 
     return item_ids, lines, entity_id
+
+
+def append_step_dimensional_sizes(filepath, size_dimensions):
+    if not size_dimensions:
+        return
+
+    with open(filepath, "r", encoding="utf-8", errors="replace") as handle:
+        text = handle.read()
+
+    product_shape_id = find_step_product_definition_shape(text)
+    shape_rep_id, context_id = find_step_shape_representation(text)
+    unit_id = find_step_length_unit(text, context_id)
+    face_map = step_advanced_face_map(text)
+    next_id = next_step_entity_id(text)
+    lines = []
+    exported_count = 0
+
+    if product_shape_id is None or shape_rep_id is None or context_id is None or unit_id is None:
+        FreeCAD.Console.PrintWarning(
+            "Skipping AP242 size dimensions because STEP context entities could not be identified.\n"
+        )
+        return
+
+    for size_dim in size_dimensions:
+        face_id = face_map.get(size_dim["subname"])
+
+        if face_id is None:
+            FreeCAD.Console.PrintWarning(
+                "Skipping AP242 size dimension {} because a face entity could not be mapped.\n".format(
+                    size_dim["name"]
+                )
+            )
+            continue
+
+        aspect_id = next_id
+        gisu_id = next_id + 1
+        next_id += 2
+
+        lines.extend([
+            "#{} = SHAPE_ASPECT('','',#{},.T.);".format(
+                aspect_id,
+                product_shape_id
+            ),
+            "#{} = GEOMETRIC_ITEM_SPECIFIC_USAGE('','',#{},#{},#{});".format(
+                gisu_id,
+                aspect_id,
+                shape_rep_id,
+                face_id
+            ),
+        ])
+
+        item_ids, item_lines, next_id = dimension_measure_items(
+            size_dim,
+            unit_id,
+            next_id
+        )
+        lines.extend(item_lines)
+
+        shape_dimension_id = next_id
+        characteristic_rep_id = next_id + 1
+        size_id = next_id + 2
+        next_id += 3
+
+        lines.extend([
+            "#{} = SHAPE_DIMENSION_REPRESENTATION('',({}),#{});".format(
+                shape_dimension_id,
+                ",".join("#{}".format(item_id) for item_id in item_ids),
+                context_id
+            ),
+            "#{} = DIMENSIONAL_CHARACTERISTIC_REPRESENTATION(#{},#{});".format(
+                characteristic_rep_id,
+                size_id,
+                shape_dimension_id
+            ),
+            "#{} = DIMENSIONAL_SIZE(#{},'{}');".format(
+                size_id,
+                aspect_id,
+                size_dim["kind"]
+            ),
+        ])
+
+        tolerances = dimension_tolerance_values_from_export_data(size_dim)
+
+        if tolerances:
+            lower_tol, upper_tol = tolerances
+            upper_measure_id = next_id
+            lower_measure_id = next_id + 1
+            tolerance_value_id = next_id + 2
+            plus_minus_id = next_id + 3
+            next_id += 4
+            lines.extend([
+                "#{} = MEASURE_WITH_UNIT({},#{});".format(
+                    upper_measure_id,
+                    step_float(upper_tol),
+                    unit_id
+                ),
+                "#{} = MEASURE_WITH_UNIT({},#{});".format(
+                    lower_measure_id,
+                    step_float(-lower_tol),
+                    unit_id
+                ),
+                "#{} = TOLERANCE_VALUE(#{},#{});".format(
+                    tolerance_value_id,
+                    lower_measure_id,
+                    upper_measure_id
+                ),
+                "#{} = PLUS_MINUS_TOLERANCE(#{},#{});".format(
+                    plus_minus_id,
+                    tolerance_value_id,
+                    size_id
+                ),
+            ])
+
+        exported_count += 1
+
+    if not lines:
+        return
+
+    insertion = "\n".join(lines) + "\n"
+    insertion_index = text.rfind("ENDSEC;")
+
+    if insertion_index < 0:
+        FreeCAD.Console.PrintWarning(
+            "Skipping AP242 size dimensions because ENDSEC was not found.\n"
+        )
+        return
+
+    text = (
+        text[:insertion_index]
+        + insertion
+        + text[insertion_index:]
+    )
+
+    with open(filepath, "w", encoding="utf-8") as handle:
+        handle.write(text)
+
+    FreeCAD.Console.PrintMessage(
+        "Added {} AP242 dimensional size entities after STEP write.\n".format(
+            exported_count
+        )
+    )
 
 
 def append_step_dimensional_locations(filepath, location_dimensions):
@@ -1510,6 +1771,16 @@ def dimension_tolerance_values_from_export_data(location_dim):
     )
 
 
+def step_file_has_null_references(filepath):
+    try:
+        with open(filepath, "r", encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+    except Exception:
+        return False
+
+    return "/*   NUL REF   */" in text
+
+
 def transfer_and_write_step(xcaf_doc, dimtol_tool, filepath):
     writer = STEPCAFControl_Writer()
     writer.SetDimTolMode(True)
@@ -1538,8 +1809,14 @@ def transfer_and_write_step(xcaf_doc, dimtol_tool, filepath):
 
     status = writer.Write(filepath)
 
+    if step_file_has_null_references(filepath):
+        raise Exception(
+            "STEP write produced null semantic references. "
+            "One or more PMI attachments could not be mapped to the exported shape."
+        )
+
     if status != IFSelect_RetDone:
-        raise Exception("STEP write failed.")
+        raise Exception("STEP write failed with status {}.".format(int(status)))
 
 
 def export_ap242(filepath):
@@ -1562,6 +1839,7 @@ def export_ap242(filepath):
     xcaf_doc, shape_tool, dimtol_tool = create_xcaf_document()
     exported_count = 0
     pending_location_dimensions = []
+    pending_size_dimensions = []
 
     for obj in doc.Objects:
         if not should_export_shape_object(obj):
@@ -1610,13 +1888,14 @@ def export_ap242(filepath):
             subshape_label_map
         )
 
-        pending_location_dimensions.extend(
-            export_dimensions(
-                doc,
-                dimtol_tool,
-                face_label_map
-            )
+        location_dimensions, size_dimensions = export_dimensions(
+            doc,
+            dimtol_tool,
+            face_label_map,
+            obj
         )
+        pending_location_dimensions.extend(location_dimensions)
+        pending_size_dimensions.extend(size_dimensions)
 
         exported_count += 1
 
@@ -1627,13 +1906,17 @@ def export_ap242(filepath):
     )
 
     if exported_count == 1:
+        append_step_dimensional_sizes(
+            filepath,
+            pending_size_dimensions
+        )
         append_step_dimensional_locations(
             filepath,
             pending_location_dimensions
         )
-    elif pending_location_dimensions:
+    elif pending_location_dimensions or pending_size_dimensions:
         FreeCAD.Console.PrintWarning(
-            "Skipping AP242 linear location dimensions because multiple export shapes were written.\n"
+            "Skipping AP242 post-write dimensions because multiple export shapes were written.\n"
         )
 
     FreeCAD.Console.PrintMessage(

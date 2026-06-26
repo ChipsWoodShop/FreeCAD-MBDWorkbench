@@ -9,6 +9,9 @@ from MBDPMI import ensure_global_link_property, ensure_pmi_identity
 from MBDViewProvider import ViewProviderSingleItemDatumTarget
 
 
+DATUM_TARGET_TYPES = ["Point", "Line"]
+
+
 def add_property_if_missing(obj, prop_type, name, group, description):
     if hasattr(obj, name):
         return
@@ -41,7 +44,15 @@ class MBDDatumTarget:
             "MBD_Target",
             "Datum target type"
         )
-        obj.TargetType = ["Point"]
+        current_target_type = (
+            str(obj.TargetType)
+            if hasattr(obj, "TargetType") and str(obj.TargetType)
+            else "Point"
+        )
+        obj.TargetType = DATUM_TARGET_TYPES
+
+        if current_target_type in DATUM_TARGET_TYPES:
+            obj.TargetType = current_target_type
 
         add_property_if_missing(
             obj,
@@ -87,6 +98,46 @@ class MBDDatumTarget:
             "TargetPoint",
             "MBD_Target",
             "Resolved nominal target point"
+        )
+
+        add_property_if_missing(
+            obj,
+            "App::PropertyString",
+            "GeometryType",
+            "MBD_Target",
+            "Resolved datum target geometry type"
+        )
+
+        add_property_if_missing(
+            obj,
+            "App::PropertyVector",
+            "TargetEndPoint1",
+            "MBD_Target",
+            "Resolved first endpoint for a line datum target"
+        )
+
+        add_property_if_missing(
+            obj,
+            "App::PropertyVector",
+            "TargetEndPoint2",
+            "MBD_Target",
+            "Resolved second endpoint for a line datum target"
+        )
+
+        add_property_if_missing(
+            obj,
+            "App::PropertyVector",
+            "TargetDirection",
+            "MBD_Target",
+            "Resolved direction for a line datum target"
+        )
+
+        add_property_if_missing(
+            obj,
+            "App::PropertyLength",
+            "TargetLength",
+            "MBD_Target",
+            "Resolved length for a line datum target"
         )
 
         add_property_if_missing(
@@ -159,7 +210,95 @@ class ViewProviderMBDDatumTarget(ViewProviderSingleItemDatumTarget):
     pass
 
 
+def _selected_construction_shape(obj):
+    construction = obj.ConstructionObject
+
+    if construction is None or not hasattr(construction, "Shape"):
+        return None
+
+    subelement = obj.ConstructionSubelement
+
+    if subelement:
+        try:
+            return construction.Shape.getElement(subelement)
+        except Exception:
+            return None
+
+    return construction.Shape
+
+
+def _point_line_distance(point, start, direction):
+    offset = point - start
+    projected = direction * offset.dot(direction)
+    return (offset - projected).Length
+
+
+def straight_edge_geometry(edge):
+    if edge is None or getattr(edge, "ShapeType", "") != "Edge":
+        return None
+
+    try:
+        start = edge.valueAt(edge.FirstParameter)
+        end = edge.valueAt(edge.LastParameter)
+    except Exception:
+        return None
+
+    chord = end - start
+    length = chord.Length
+
+    if length <= 1e-9:
+        return None
+
+    direction = FreeCAD.Vector(chord)
+    direction.normalize()
+    tolerance = max(1e-6, length * 1e-6)
+
+    try:
+        for fraction in (0.25, 0.5, 0.75):
+            parameter = (
+                edge.FirstParameter
+                + (edge.LastParameter - edge.FirstParameter) * fraction
+            )
+            point = edge.valueAt(parameter)
+
+            if _point_line_distance(point, start, direction) > tolerance:
+                return None
+    except Exception:
+        return None
+
+    return {
+        "type": "Line",
+        "point": (start + end) * 0.5,
+        "start": start,
+        "end": end,
+        "direction": direction,
+        "length": length,
+    }
+
+
+def line_geometry_from_target(obj):
+    shape = _selected_construction_shape(obj)
+
+    if shape is None:
+        return None
+
+    if getattr(shape, "ShapeType", "") == "Edge":
+        return straight_edge_geometry(shape)
+
+    try:
+        if len(shape.Edges) == 1:
+            return straight_edge_geometry(shape.Edges[0])
+    except Exception:
+        pass
+
+    return None
+
+
 def get_point_from_target(obj):
+    if str(obj.TargetType) == "Line":
+        line = line_geometry_from_target(obj)
+        return line["point"] if line else None
+
     construction = obj.ConstructionObject
 
     if construction is None:
@@ -180,24 +319,45 @@ def get_point_from_target(obj):
             pass
 
     try:
-        if hasattr(construction, "Placement"):
-            return construction.Placement.Base
+        if len(construction.Shape.Vertexes) > 0:
+            return construction.Shape.Vertexes[0].Point
     except Exception:
         pass
 
     try:
-        if len(construction.Shape.Vertexes) > 0:
-            return construction.Shape.Vertexes[0].Point
+        if hasattr(construction, "Placement"):
+            return construction.Placement.Base
     except Exception:
         pass
 
     return None
 
 
-def target_surface_distance(obj):
-    point = get_point_from_target(obj)
+def target_sample_points(obj):
+    if str(obj.TargetType) == "Line":
+        line = line_geometry_from_target(obj)
 
-    if point is None:
+        if line is None:
+            return []
+
+        start = line["start"]
+        end = line["end"]
+        return [
+            start,
+            start + (end - start) * 0.25,
+            line["point"],
+            start + (end - start) * 0.75,
+            end,
+        ]
+
+    point = get_point_from_target(obj)
+    return [point] if point is not None else []
+
+
+def target_surface_distance(obj):
+    points = target_sample_points(obj)
+
+    if not points:
         return None
 
     if obj.ReferencedObject is None or not obj.ReferencedSubelement:
@@ -205,8 +365,10 @@ def target_surface_distance(obj):
 
     try:
         surface = obj.ReferencedObject.Shape.getElement(obj.ReferencedSubelement)
-        vertex = Part.Vertex(point)
-        return vertex.distToShape(surface)[0]
+        return max(
+            Part.Vertex(point).distToShape(surface)[0]
+            for point in points
+        )
     except Exception:
         return None
 
@@ -219,6 +381,21 @@ def update_datum_target_signature(obj):
         return
 
     obj.TargetPoint = point
+    obj.GeometryType = str(obj.TargetType)
+    line = None
+
+    if str(obj.TargetType) == "Line":
+        line = line_geometry_from_target(obj)
+
+        if line is None:
+            obj.GeometrySignatureValid = False
+            return
+
+        obj.TargetEndPoint1 = line["start"]
+        obj.TargetEndPoint2 = line["end"]
+        obj.TargetDirection = line["direction"]
+        obj.TargetLength = line["length"]
+
     distance = target_surface_distance(obj)
 
     if distance is not None:
@@ -245,6 +422,24 @@ def update_datum_target_signature(obj):
             round(point.z, 6),
         ],
     }
+
+    if line is not None:
+        signature["TargetEndPoint1"] = [
+            round(line["start"].x, 6),
+            round(line["start"].y, 6),
+            round(line["start"].z, 6),
+        ]
+        signature["TargetEndPoint2"] = [
+            round(line["end"].x, 6),
+            round(line["end"].y, 6),
+            round(line["end"].z, 6),
+        ]
+        signature["TargetDirection"] = [
+            round(line["direction"].x, 6),
+            round(line["direction"].y, 6),
+            round(line["direction"].z, 6),
+        ]
+        signature["TargetLength"] = round(line["length"], 6)
 
     if distance is not None:
         signature["SurfaceDistance"] = round(distance, 6)

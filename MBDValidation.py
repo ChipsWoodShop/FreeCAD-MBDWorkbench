@@ -134,9 +134,18 @@ def validate_datum(obj):
 
 def validate_datum_target(obj):
     errors = []
+    target_type = str(obj.TargetType)
 
     if not obj.TargetId:
         errors.append("{} has no target ID.".format(obj.Name))
+
+    if target_type not in MBDDatumTarget.DATUM_TARGET_TYPES:
+        errors.append(
+            "{} has unsupported target type {}.".format(
+                obj.Name,
+                target_type
+            )
+        )
 
     if obj.ParentDatum is None:
         errors.append("{} has no parent datum.".format(obj.Name))
@@ -156,12 +165,29 @@ def validate_datum_target(obj):
 
     if point is None:
         errors.append(
-            "{} construction reference does not resolve to a point.".format(
-                obj.Name
+            "{} construction reference does not resolve to a supported {} target.".format(
+                obj.Name,
+                target_type.lower()
             )
         )
     else:
         obj.TargetPoint = point
+        obj.GeometryType = target_type
+
+    if target_type == "Line":
+        line = MBDDatumTarget.line_geometry_from_target(obj)
+
+        if line is None:
+            errors.append(
+                "{} line target requires one finite straight construction edge.".format(
+                    obj.Name
+                )
+            )
+        else:
+            obj.TargetEndPoint1 = line["start"]
+            obj.TargetEndPoint2 = line["end"]
+            obj.TargetDirection = line["direction"]
+            obj.TargetLength = line["length"]
 
     distance = MBDDatumTarget.target_surface_distance(obj)
 
@@ -177,8 +203,9 @@ def validate_datum_target(obj):
 
         if distance > obj.SurfaceTolerance:
             errors.append(
-                "{} target point is {:.6f} mm from {}.{}.".format(
+                "{} target {} is {:.6f} mm from {}.{}.".format(
                     obj.Name,
+                    target_type.lower(),
                     distance,
                     obj.ReferencedObject.Name,
                     obj.ReferencedSubelement
@@ -514,6 +541,100 @@ def datum_targets_for(doc, datum_obj):
     ]
 
 
+def _distinct_target_points(points, tolerance=1e-6):
+    distinct = []
+
+    for point in points:
+        if point is None:
+            continue
+
+        if not any((point - existing).Length <= tolerance for existing in distinct):
+            distinct.append(point)
+
+    return distinct
+
+
+def _target_support_points(target):
+    if str(target.TargetType) == "Line":
+        line = MBDDatumTarget.line_geometry_from_target(target)
+
+        if line is None:
+            return []
+
+        return [line["start"], line["end"]]
+
+    point = MBDDatumTarget.get_point_from_target(target)
+    return [point] if point is not None else []
+
+
+def _points_are_collinear(points, tolerance=1e-6):
+    if len(points) < 3:
+        return True
+
+    origin = points[0]
+    direction = None
+
+    for point in points[1:]:
+        vector = point - origin
+
+        if vector.Length > tolerance:
+            direction = vector
+            break
+
+    if direction is None:
+        return True
+
+    for point in points[1:]:
+        if direction.cross(point - origin).Length > tolerance:
+            return False
+
+    return True
+
+
+def _target_independence_error(obj, role_name, datum_obj, targets):
+    support_points = []
+
+    for target in targets:
+        support_points.extend(_target_support_points(target))
+
+    distinct_points = _distinct_target_points(support_points)
+
+    if role_name == "Primary":
+        if len(distinct_points) < 3:
+            return (
+                "{} uses target-based primary datum {}, but its targets do not provide three distinct support points.".format(
+                    obj.Name,
+                    datum_obj.DatumLabel
+                )
+            )
+
+        if _points_are_collinear(distinct_points):
+            return (
+                "{} uses target-based primary datum {}, but its targets are collinear and do not establish a datum plane.".format(
+                    obj.Name,
+                    datum_obj.DatumLabel
+                )
+            )
+
+    if role_name == "Secondary" and len(distinct_points) < 2:
+        return (
+            "{} uses target-based secondary datum {}, but its targets do not provide two distinct support points.".format(
+                obj.Name,
+                datum_obj.DatumLabel
+            )
+        )
+
+    if role_name == "Tertiary" and len(distinct_points) < 1:
+        return (
+            "{} uses target-based tertiary datum {}, but no usable target support point was found.".format(
+                obj.Name,
+                datum_obj.DatumLabel
+            )
+        )
+
+    return None
+
+
 def validate_datum_system_target_sufficiency(doc, obj):
     errors = []
     required_counts = {
@@ -531,21 +652,33 @@ def validate_datum_system_target_sufficiency(doc, obj):
             if not targets:
                 continue
 
-            point_targets = [
-                target for target in targets
-                if str(target.TargetType) == "Point"
-            ]
+            constraint_count = sum(
+                2 if str(target.TargetType) == "Line" else 1
+                for target in targets
+                if str(target.TargetType) in {"Point", "Line"}
+            )
 
-            if len(point_targets) < required_count:
+            if constraint_count < required_count:
                 errors.append(
-                    "{} uses target-based {} datum {}, but {} point targets are required and {} are defined.".format(
+                    "{} uses target-based {} datum {}, but {} point-equivalent constraints are required and {} are defined.".format(
                         obj.Name,
                         role_name.lower(),
                         datum_obj.DatumLabel,
                         required_count,
-                        len(point_targets)
+                        constraint_count
                     )
                 )
+                continue
+
+            independence_error = _target_independence_error(
+                obj,
+                role_name,
+                datum_obj,
+                targets
+            )
+
+            if independence_error:
+                errors.append(independence_error)
 
     return errors
 
