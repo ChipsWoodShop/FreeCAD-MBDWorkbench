@@ -1,6 +1,7 @@
 # MBDExporter.py
 
 import json
+import math
 import re
 
 import FreeCAD
@@ -347,6 +348,10 @@ def dimension_is_linear_location(dim_obj):
     )
 
 
+def dimension_is_angular(dim_obj):
+    return str(getattr(dim_obj, "DimensionKind", "")) == "Angular"
+
+
 def dimension_values(dim_obj):
     purpose = str(getattr(dim_obj, "DimensionPurpose", ""))
 
@@ -676,7 +681,22 @@ def datum_target_axis(target_obj):
         pass
 
     normal.normalize()
-    if str(target_obj.TargetType) == "Line":
+    reference = None
+
+    if str(target_obj.TargetType) in ("Line", "Circle", "Rectangle"):
+        reference = FreeCAD.Vector(getattr(target_obj, "TargetDirection", FreeCAD.Vector()))
+
+        if reference.Length > 1e-9:
+            reference = reference - normal * reference.dot(normal)
+
+            if reference.Length <= 1e-9:
+                reference = None
+            else:
+                reference.normalize()
+        else:
+            reference = None
+
+    if str(target_obj.TargetType) == "Line" and reference is None:
         line = MBDDatumTarget.line_geometry_from_target(target_obj)
 
         if line is None:
@@ -689,7 +709,8 @@ def datum_target_axis(target_obj):
             return None
 
         reference.normalize()
-    else:
+
+    if reference is None:
         reference = perpendicular_reference_direction(normal)
 
     return gp_Ax2(
@@ -734,6 +755,9 @@ def configure_datum_target(datum_label, target_obj):
     if target_enum is None:
         return False
 
+    if target_type == "Area":
+        return False
+
     datum_obj.SetDatumTargetType(target_enum)
     datum_obj.SetDatumTargetAxis(target_axis)
     datum_obj.SetDatumTargetNumber(target_number)
@@ -745,6 +769,23 @@ def configure_datum_target(datum_label, target_obj):
             return False
 
         datum_obj.SetDatumTargetLength(float(line["length"]))
+
+    if target_type == "Circle":
+        circle = MBDDatumTarget.circle_geometry_from_target(target_obj)
+
+        if circle is None:
+            return False
+
+        datum_obj.SetDatumTargetLength(float(circle["diameter"]))
+
+    if target_type == "Rectangle":
+        rectangle = MBDDatumTarget.rectangle_geometry_from_target(target_obj)
+
+        if rectangle is None:
+            return False
+
+        datum_obj.SetDatumTargetLength(float(rectangle["length"]))
+        datum_obj.SetDatumTargetWidth(float(rectangle["width"]))
 
     datum_attr.SetObject(datum_obj)
     return True
@@ -766,6 +807,14 @@ def export_datum_targets(doc, dimtol_tool, face_label_map):
             continue
 
         datum_label = dimtol_tool.AddDatum()
+
+        if str(getattr(target_obj, "TargetType", "")) == "Area":
+            FreeCAD.Console.PrintWarning(
+                "Skipping AP242 export for arbitrary area datum target {} because the current OCCT writer path does not emit generic Area targets.\n".format(
+                    target_obj.TargetId
+                )
+            )
+            continue
 
         if not configure_datum_target(datum_label, target_obj):
             FreeCAD.Console.PrintWarning(
@@ -839,9 +888,18 @@ def configure_geometric_tolerance(geomtol_label, pmi_obj):
         float(pmi_obj.ToleranceValue)
     )
 
+    material_modifier = str(
+        getattr(pmi_obj, "MaterialConditionModifier", "None")
+    )
+    material_requirement = XDTO.XCAFDimTolObjects_GeomToleranceMatReqModif_None
+    if material_modifier == "MMC":
+        material_requirement = XDTO.XCAFDimTolObjects_GeomToleranceMatReqModif_M
+    elif material_modifier == "LMC":
+        material_requirement = XDTO.XCAFDimTolObjects_GeomToleranceMatReqModif_L
+
     TDataStd_Integer.Set(
         geomtol_label.FindChild(GEOMTOL_CHILD_MATERIAL_REQUIREMENT),
-        int(XDTO.XCAFDimTolObjects_GeomToleranceMatReqModif_None)
+        int(material_requirement)
     )
 
     TDataStd_Integer.Set(
@@ -956,8 +1014,13 @@ def export_feature_control_frames(
 
 
 def export_dimensions(doc, dimtol_tool, face_label_map, export_obj):
+    # Prefer native OCCT/XCAF dimension export when it produces valid shape
+    # references. For radius, angular, and selected location cases, the direct
+    # writer path produced null STEP references during testing, so collect those
+    # dimensions here and append a narrow AP242 entity set after the main write.
     pending_location_dimensions = []
     pending_size_dimensions = []
+    pending_angular_dimensions = []
 
     for dim_obj in iter_semantic_dimensions(doc):
         dimension_type = dimension_type_value(dim_obj)
@@ -996,6 +1059,52 @@ def export_dimensions(doc, dimtol_tool, face_label_map, export_obj):
             continue
 
         if dimension_type is None:
+            if dimension_is_angular(dim_obj):
+                first_subname = dimension_reference_subname(
+                    export_obj,
+                    getattr(dim_obj, "ReferenceObject1", None),
+                    getattr(dim_obj, "ReferenceSubelement1", "")
+                )
+                second_subname = dimension_reference_subname(
+                    export_obj,
+                    getattr(dim_obj, "ReferenceObject2", None),
+                    getattr(dim_obj, "ReferenceSubelement2", "")
+                )
+
+                if first_subname in face_label_map and second_subname in face_label_map:
+                    angular_entity = str(
+                        getattr(dim_obj, "AP242Entity", "")
+                    )
+
+                    if angular_entity not in ("ANGULAR_SIZE", "ANGULAR_LOCATION"):
+                        angular_entity = "ANGULAR_LOCATION"
+
+                    pending_angular_dimensions.append({
+                        "name": getattr(dim_obj, "Name", ""),
+                        "first_subname": first_subname,
+                        "second_subname": second_subname,
+                        "entity": angular_entity,
+                        "nominal": dimension_nominal_value(dim_obj),
+                        "purpose": str(getattr(dim_obj, "DimensionPurpose", "")),
+                        "lower_tolerance": float(getattr(dim_obj, "LowerTolerance", 0.0)),
+                        "upper_tolerance": float(getattr(dim_obj, "UpperTolerance", 0.0)),
+                        "lower_limit": float(getattr(dim_obj, "LowerLimit", 0.0)),
+                        "upper_limit": float(getattr(dim_obj, "UpperLimit", 0.0)),
+                    })
+                    FreeCAD.Console.PrintMessage(
+                        "Creating semantic angular dimension on {} using AP242 post-write entities\n".format(
+                            dimension_export_attachment_text(dim_obj)
+                        )
+                    )
+                    continue
+
+                FreeCAD.Console.PrintWarning(
+                    "Skipping AP242 export for angular dimension on {} because both references must map to exported faces.\n".format(
+                        dimension_export_attachment_text(dim_obj)
+                    )
+                )
+                continue
+
             if dimension_is_linear_location(dim_obj):
                 first_subname = dimension_reference_subname(
                     export_obj,
@@ -1105,7 +1214,7 @@ def export_dimensions(doc, dimtol_tool, face_label_map, export_obj):
                 dim_label
             )
 
-    return pending_location_dimensions, pending_size_dimensions
+    return pending_location_dimensions, pending_size_dimensions, pending_angular_dimensions
 
 
 def link_datums_to_geom_tolerance(
@@ -1401,6 +1510,43 @@ def find_step_length_unit(text, context_id=None):
     return int(match.group(1))
 
 
+def find_step_plane_angle_unit(text, context_id=None):
+    if context_id is not None:
+        context_match = re.search(
+            r"#{}\s*=\s*\(.*?GLOBAL_UNIT_ASSIGNED_CONTEXT\s*\(\((.*?)\)\).*?"
+            r"REPRESENTATION_CONTEXT".format(context_id),
+            text,
+            re.DOTALL
+        )
+
+        if context_match:
+            for ref in context_match.group(1).replace("\n", " ").split(","):
+                ref = ref.strip()
+
+                if not ref.startswith("#"):
+                    continue
+
+                unit_id = int(ref[1:])
+
+                if re.search(
+                    r"#{}\s*=\s*\(.*?PLANE_ANGLE_UNIT\(\)".format(unit_id),
+                    text,
+                    re.DOTALL
+                ):
+                    return unit_id
+
+    match = re.search(
+        r"#(\d+)\s*=\s*\(.*?PLANE_ANGLE_UNIT\(\)",
+        text,
+        re.DOTALL
+    )
+
+    if not match:
+        return None
+
+    return int(match.group(1))
+
+
 def step_advanced_face_map(text):
     face_ids = re.findall(
         r"#(\d+)\s*=\s*ADVANCED_FACE\(",
@@ -1451,6 +1597,39 @@ def dimension_measure_items(dimension_data, unit_id, first_id):
             "REPRESENTATION_ITEM('{}') );".format(
                 entity_id,
                 step_float(value),
+                unit_id,
+                label
+            )
+        )
+        entity_id += 1
+
+    return item_ids, lines, entity_id
+
+
+def angular_dimension_measure_items(dimension_data, unit_id, first_id):
+    purpose = dimension_data["purpose"]
+    entity_id = first_id
+    item_ids = []
+    lines = []
+
+    if purpose == "Limits":
+        values = [
+            ("nominal angle", dimension_data["nominal"]),
+            ("lower limit", dimension_data["lower_limit"]),
+            ("upper limit", dimension_data["upper_limit"]),
+        ]
+    else:
+        values = [
+            ("nominal angle", dimension_data["nominal"]),
+        ]
+
+    for label, value in values:
+        item_ids.append(entity_id)
+        lines.append(
+            "#{} = ( MEASURE_REPRESENTATION_ITEM() MEASURE_WITH_UNIT("
+            "PLANE_ANGLE_MEASURE({}),#{}) REPRESENTATION_ITEM('{}') );".format(
+                entity_id,
+                step_float(math.radians(float(value))),
                 unit_id,
                 label
             )
@@ -1761,6 +1940,170 @@ def append_step_dimensional_locations(filepath, location_dimensions):
     )
 
 
+def append_step_angular_dimensions(filepath, angular_dimensions):
+    if not angular_dimensions:
+        return
+
+    with open(filepath, "r", encoding="utf-8", errors="replace") as handle:
+        text = handle.read()
+
+    product_shape_id = find_step_product_definition_shape(text)
+    shape_rep_id, context_id = find_step_shape_representation(text)
+    unit_id = find_step_plane_angle_unit(text, context_id)
+    face_map = step_advanced_face_map(text)
+    next_id = next_step_entity_id(text)
+    lines = []
+    exported_count = 0
+
+    if product_shape_id is None or shape_rep_id is None or context_id is None or unit_id is None:
+        FreeCAD.Console.PrintWarning(
+            "Skipping AP242 angular dimensions because STEP context entities could not be identified.\n"
+        )
+        return
+
+    for angular_dim in angular_dimensions:
+        first_face_id = face_map.get(angular_dim["first_subname"])
+        second_face_id = face_map.get(angular_dim["second_subname"])
+
+        if first_face_id is None or second_face_id is None:
+            FreeCAD.Console.PrintWarning(
+                "Skipping AP242 angular dimension {} because a face entity could not be mapped.\n".format(
+                    angular_dim["name"]
+                )
+            )
+            continue
+
+        first_aspect_id = next_id
+        first_gisu_id = next_id + 1
+        second_aspect_id = next_id + 2
+        second_gisu_id = next_id + 3
+        next_id += 4
+
+        lines.extend([
+            "#{} = SHAPE_ASPECT('','',#{},.T.);".format(
+                first_aspect_id,
+                product_shape_id
+            ),
+            "#{} = GEOMETRIC_ITEM_SPECIFIC_USAGE('','',#{},#{},#{});".format(
+                first_gisu_id,
+                first_aspect_id,
+                shape_rep_id,
+                first_face_id
+            ),
+            "#{} = SHAPE_ASPECT('','',#{},.T.);".format(
+                second_aspect_id,
+                product_shape_id
+            ),
+            "#{} = GEOMETRIC_ITEM_SPECIFIC_USAGE('','',#{},#{},#{});".format(
+                second_gisu_id,
+                second_aspect_id,
+                shape_rep_id,
+                second_face_id
+            ),
+        ])
+
+        item_ids, item_lines, next_id = angular_dimension_measure_items(
+            angular_dim,
+            unit_id,
+            next_id
+        )
+        lines.extend(item_lines)
+
+        shape_dimension_id = next_id
+        characteristic_rep_id = next_id + 1
+        angular_id = next_id + 2
+        next_id += 3
+
+        angular_entity = angular_dim.get("entity", "ANGULAR_LOCATION")
+
+        if angular_entity == "ANGULAR_SIZE":
+            characteristic_line = "#{} = ANGULAR_SIZE(#{},'angle');".format(
+                angular_id,
+                first_aspect_id
+            )
+        else:
+            characteristic_line = "#{} = ANGULAR_LOCATION('angular distance',$,#{},#{});".format(
+                angular_id,
+                first_aspect_id,
+                second_aspect_id
+            )
+
+        lines.extend([
+            "#{} = SHAPE_DIMENSION_REPRESENTATION('',({}),#{});".format(
+                shape_dimension_id,
+                ",".join("#{}".format(item_id) for item_id in item_ids),
+                context_id
+            ),
+            "#{} = DIMENSIONAL_CHARACTERISTIC_REPRESENTATION(#{},#{});".format(
+                characteristic_rep_id,
+                angular_id,
+                shape_dimension_id
+            ),
+            characteristic_line,
+        ])
+
+        tolerances = dimension_tolerance_values_from_export_data(angular_dim)
+
+        if tolerances:
+            lower_tol, upper_tol = tolerances
+            upper_measure_id = next_id
+            lower_measure_id = next_id + 1
+            tolerance_value_id = next_id + 2
+            plus_minus_id = next_id + 3
+            next_id += 4
+            lines.extend([
+                "#{} = MEASURE_WITH_UNIT(PLANE_ANGLE_MEASURE({}),#{});".format(
+                    upper_measure_id,
+                    step_float(math.radians(upper_tol)),
+                    unit_id
+                ),
+                "#{} = MEASURE_WITH_UNIT(PLANE_ANGLE_MEASURE({}),#{});".format(
+                    lower_measure_id,
+                    step_float(math.radians(-lower_tol)),
+                    unit_id
+                ),
+                "#{} = TOLERANCE_VALUE(#{},#{});".format(
+                    tolerance_value_id,
+                    lower_measure_id,
+                    upper_measure_id
+                ),
+                "#{} = PLUS_MINUS_TOLERANCE(#{},#{});".format(
+                    plus_minus_id,
+                    tolerance_value_id,
+                    angular_id
+                ),
+            ])
+
+        exported_count += 1
+
+    if not lines:
+        return
+
+    insertion = "\n".join(lines) + "\n"
+    insertion_index = text.rfind("ENDSEC;")
+
+    if insertion_index < 0:
+        FreeCAD.Console.PrintWarning(
+            "Skipping AP242 angular dimensions because ENDSEC was not found.\n"
+        )
+        return
+
+    text = (
+        text[:insertion_index]
+        + insertion
+        + text[insertion_index:]
+    )
+
+    with open(filepath, "w", encoding="utf-8") as handle:
+        handle.write(text)
+
+    FreeCAD.Console.PrintMessage(
+        "Added {} AP242 angular dimension entities after STEP write.\n".format(
+            exported_count
+        )
+    )
+
+
 def dimension_tolerance_values_from_export_data(location_dim):
     if location_dim["purpose"] not in ("UnequalBilateral", "EqualBilateral"):
         return None
@@ -1840,6 +2183,7 @@ def export_ap242(filepath):
     exported_count = 0
     pending_location_dimensions = []
     pending_size_dimensions = []
+    pending_angular_dimensions = []
 
     for obj in doc.Objects:
         if not should_export_shape_object(obj):
@@ -1888,7 +2232,7 @@ def export_ap242(filepath):
             subshape_label_map
         )
 
-        location_dimensions, size_dimensions = export_dimensions(
+        location_dimensions, size_dimensions, angular_dimensions = export_dimensions(
             doc,
             dimtol_tool,
             face_label_map,
@@ -1896,6 +2240,7 @@ def export_ap242(filepath):
         )
         pending_location_dimensions.extend(location_dimensions)
         pending_size_dimensions.extend(size_dimensions)
+        pending_angular_dimensions.extend(angular_dimensions)
 
         exported_count += 1
 
@@ -1906,6 +2251,9 @@ def export_ap242(filepath):
     )
 
     if exported_count == 1:
+        # The post-write entity pass references face IDs from the single STEP
+        # product shape. It is intentionally disabled for multi-shape exports
+        # until we have unambiguous per-shape reference mapping.
         append_step_dimensional_sizes(
             filepath,
             pending_size_dimensions
@@ -1914,7 +2262,11 @@ def export_ap242(filepath):
             filepath,
             pending_location_dimensions
         )
-    elif pending_location_dimensions or pending_size_dimensions:
+        append_step_angular_dimensions(
+            filepath,
+            pending_angular_dimensions
+        )
+    elif pending_location_dimensions or pending_size_dimensions or pending_angular_dimensions:
         FreeCAD.Console.PrintWarning(
             "Skipping AP242 post-write dimensions because multiple export shapes were written.\n"
         )

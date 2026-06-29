@@ -17,6 +17,7 @@ import MBDExporter
 import MBDBasicDimension
 import MBDDimension
 import MBDDatumTarget
+import MBDImporter
 import MBDValidation
 from MBDDatum import MBDDatumFeature, update_geometry_signature
 from MBDDatumSystem import (
@@ -40,6 +41,7 @@ from MBDViewProvider import (
     fcf_attachment_point,
     fcf_cells as view_provider_fcf_cells,
     fcf_leader_segments,
+    fcf_tolerance_width,
     symbol_segments,
 )
 
@@ -161,6 +163,15 @@ def export_smoke(mode, output_path, controlled_subelement):
         add_position_fcf(doc, box_obj, datum_system, False, controlled_subelement)
     elif mode == "fcf-diameter":
         add_position_fcf(doc, box_obj, datum_system, True, controlled_subelement)
+    elif mode == "fcf-material-modifier":
+        fcf = add_position_fcf(
+            doc,
+            box_obj,
+            datum_system,
+            True,
+            controlled_subelement
+        )
+        fcf.MaterialConditionModifier = "MMC"
     elif mode == "all-fcfs":
         add_export_fcf(
             doc,
@@ -240,6 +251,15 @@ def export_smoke(mode, output_path, controlled_subelement):
     if not exists or size <= 0:
         raise AssertionError("export did not create a non-empty STEP file")
 
+    if mode == "fcf-material-modifier":
+        with open(output_path, "r", encoding="utf-8", errors="ignore") as step_file:
+            step_text = step_file.read().upper()
+
+        if "MAXIMUM_MATERIAL_REQUIREMENT" not in step_text:
+            raise AssertionError(
+                "MMC FCF export did not write MAXIMUM_MATERIAL_REQUIREMENT"
+            )
+
     print("headless smoke export passed:", mode, output_path, size)
 
 
@@ -268,6 +288,127 @@ def stale_cancel_smoke(output_path):
         raise AssertionError("cancelled export wrote {}".format(output_path))
 
     print("stale attachment cancellation passed")
+
+
+def ap242_pmi_scan_smoke(output_path):
+    step_text = """ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION(('AP242'),'2;1');
+ENDSEC;
+DATA;
+#1 = ( GEOMETRIC_TOLERANCE('','',#16,#17) GEOMETRIC_TOLERANCE_WITH_DATUM_REFERENCE((#2)) POSITION_TOLERANCE() );
+#2 = DATUM_SYSTEM('',());
+#3 = DIMENSIONAL_SIZE(#4,'diameter');
+#4 = SHAPE_ASPECT('','',#5,.T.);
+#5 = PRODUCT_DEFINITION_SHAPE('','',#6);
+#6 = PRODUCT_DEFINITION('','',#7,#8);
+#7 = PRODUCT_DEFINITION_FORMATION('','',#9);
+#8 = PRODUCT_DEFINITION_CONTEXT('',#10,'design');
+#9 = PRODUCT('','',(),());
+#10 = APPLICATION_CONTEXT('');
+#11 = ANGULAR_SIZE(#4,'angle');
+#12 = DIMENSION_CURVE('',#13,#14);
+#15 = COAXIALITY_TOLERANCE('',0.1,#2);
+#16 = LENGTH_MEASURE_WITH_UNIT(LENGTH_MEASURE(0.1),#19);
+#17 = GEOMETRIC_TOLERANCE_VALUE(#16);
+#18 = DATUM_REFERENCE_COMPARTMENT('','',#19,.F.,COMMON_DATUM_LIST(#20,#21),$);
+#19 = ( LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.MILLI.,.METRE.) );
+#20 = DATUM_REFERENCE_ELEMENT('','',#19,.F.,#22,$);
+#21 = DATUM_REFERENCE_ELEMENT('','',#19,.F.,#23,$);
+ENDSEC;
+END-ISO-10303-21;
+"""
+
+    with open(output_path, "w", encoding="utf-8") as handle:
+        handle.write(step_text)
+
+    scan = MBDImporter.scan_step_pmi_entities(output_path)
+    report = MBDImporter.format_step_pmi_scan_report(scan)
+
+    unsupported_entities = {
+        finding["entity"] for finding in scan["unsupported"]
+    }
+    partial_entities = {
+        finding["entity"] for finding in scan["partial"]
+    }
+
+    expected = {
+        "DIMENSION_CURVE",
+        "COAXIALITY_TOLERANCE",
+    }
+
+    if not expected.issubset(unsupported_entities):
+        raise AssertionError(
+            "AP242 PMI scan did not flag expected unsupported entities: {}".format(
+                report
+            )
+        )
+
+    if "DIMENSIONAL_SIZE" not in partial_entities or "ANGULAR_SIZE" not in partial_entities:
+        raise AssertionError(
+            "AP242 PMI scan did not separate partial entities: {}".format(
+                report
+            )
+        )
+
+    if "POSITION_TOLERANCE" not in report or "DIMENSIONAL_SIZE" not in report:
+        raise AssertionError(
+            "AP242 PMI scan did not report supported entities: {}".format(report)
+        )
+
+    if "Summary:" not in report or "Do not implement" not in report:
+        raise AssertionError(
+            "AP242 PMI scan did not summarize coverage status: {}".format(report)
+        )
+
+    if "GEOMETRIC_TOLERANCE_WITH_DATUM_REFERENCE" not in report:
+        raise AssertionError(
+            "AP242 PMI scan did not inspect complex FCF entity members: {}".format(report)
+        )
+
+    if "COMMON_DATUM_LIST" not in report:
+        raise AssertionError(
+            "AP242 PMI scan did not inspect nested common datum entities: {}".format(report)
+        )
+
+    if "Import warning:" not in report:
+        raise AssertionError(
+            "AP242 PMI scan did not warn on unsupported entities: {}".format(report)
+        )
+
+    partial_only_text = """ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION(('AP242'),'2;1');
+ENDSEC;
+DATA;
+#1 = DIMENSIONAL_SIZE(#2,'diameter');
+#2 = SHAPE_ASPECT('','',#3,.T.);
+#3 = PRODUCT_DEFINITION_SHAPE('','',#4);
+ENDSEC;
+END-ISO-10303-21;
+"""
+
+    with open(output_path, "w", encoding="utf-8") as handle:
+        handle.write(partial_only_text)
+
+    partial_scan = MBDImporter.scan_step_pmi_entities(output_path)
+    partial_report = MBDImporter.format_step_pmi_scan_report(partial_scan)
+
+    if not partial_scan["partial"] or partial_scan["unsupported"]:
+        raise AssertionError(
+            "AP242 PMI scan did not separate partial-only coverage: {}".format(
+                partial_report
+            )
+        )
+
+    if "Import caution:" not in partial_report:
+        raise AssertionError(
+            "AP242 PMI scan did not caution on partial-only coverage: {}".format(
+                partial_report
+            )
+        )
+
+    print("AP242 PMI scan smoke passed")
 
 
 def dimension_export_smoke(output_path):
@@ -358,6 +499,27 @@ def dimension_export_smoke(output_path):
     location_dim.ReferenceSubelement2 = "Face4"
     MBDDimension.update_dimension_signature(location_dim)
 
+    angular_dim = doc.addObject(
+        "App::DocumentObjectGroupPython",
+        "MBD_Dimension_Angular"
+    )
+    MBDDimension.MBDDimension(angular_dim)
+    angular_dim.DimensionPurpose = "EqualBilateral"
+    angular_dim.DimensionKind = "Angular"
+    angular_dim.MeasurementType = "Distance"
+    angular_dim.NominalValue = 90.0
+    angular_dim.UpperTolerance = 0.5
+    angular_dim.LowerTolerance = 0.5
+    angular_dim.ReferenceObject1 = box_obj
+    angular_dim.ReferenceSubelement1 = "Face1"
+    angular_dim.ReferenceObject2 = box_obj
+    angular_dim.ReferenceSubelement2 = "Face3"
+    angular_dim.AP242Entity = "ANGULAR_LOCATION"
+    MBDDimension.update_dimension_signature(angular_dim)
+
+    if "°" not in MBDDimension.dimension_display_label(angular_dim):
+        raise AssertionError("angular dimension label should use the degree symbol")
+
     doc.recompute()
 
     if os.path.exists(output_path):
@@ -379,6 +541,9 @@ def dimension_export_smoke(output_path):
 
     if "DIMENSIONAL_SIZE" not in step_text or "'RADIUS'" not in step_text:
         raise AssertionError("dimension export did not write a radius dimensional size")
+
+    if "ANGULAR_LOCATION" not in step_text:
+        raise AssertionError("dimension export did not write an angular location")
 
     if "/*   NUL REF   */" in step_text:
         raise AssertionError("dimension export wrote a null semantic reference")
@@ -523,11 +688,122 @@ def line_datum_target_export_smoke(output_path):
     print("semantic line datum target export passed:", output_path, size)
 
 
+def area_datum_target_export_smoke(output_path):
+    MBDExporter.QtGui.QMessageBox = AcceptMessageBox
+
+    doc, box_obj = make_doc("MBDAreaDatumTargetExportSmoke")
+    datum_a, _datum_b, _datum_c, datum_system = make_datum_set(doc, box_obj)
+    add_position_fcf(doc, box_obj, datum_system, False, "Face1")
+
+    circle_point = doc.addObject("Part::Feature", "DatumTargetCirclePointA1")
+    circle_point.Shape = Part.Vertex(FreeCAD.Vector(0, 10, 10))
+
+    rectangle_point = doc.addObject("Part::Feature", "DatumTargetRectanglePointA2")
+    rectangle_point.Shape = Part.Vertex(FreeCAD.Vector(0, 6, 6))
+
+    area = doc.addObject("Part::Feature", "DatumTargetAreaA3")
+    area.Shape = Part.Face(Part.makePolygon([
+        FreeCAD.Vector(0, 12, 12),
+        FreeCAD.Vector(0, 16, 12),
+        FreeCAD.Vector(0, 14, 16),
+        FreeCAD.Vector(0, 12, 12),
+    ]))
+    doc.recompute()
+
+    target_specs = [
+        ("A1", "Circle", circle_point),
+        ("A2", "Rectangle", rectangle_point),
+        ("A3", "Area", area),
+    ]
+    targets = []
+
+    for target_id, target_type, construction in target_specs:
+        target = doc.addObject(
+            "App::DocumentObjectGroupPython",
+            "MBD_DatumTarget_" + target_id
+        )
+        MBDDatumTarget.MBDDatumTarget(target)
+        target.TargetId = target_id
+        target.TargetType = target_type
+        target.ParentDatum = datum_a
+        target.ConstructionObject = construction
+        if target_type == "Circle":
+            target.TargetDiameter = 4.0
+            target.TargetLength = 4.0
+        if target_type == "Rectangle":
+            target.TargetLength = 4.0
+            target.TargetWidth = 4.0
+        target.ReferencedObject = box_obj
+        target.ReferencedSubelement = "Face1"
+        MBDDatumTarget.update_datum_target_signature(target)
+        targets.append(target)
+
+    doc.recompute()
+
+    for target in targets:
+        errors = MBDValidation.validate_datum_target(target)
+
+        if errors:
+            target_name = target.Name
+            FreeCAD.closeDocument(doc.Name)
+            raise AssertionError(
+                "{} validation failed: {}".format(target_name, errors)
+            )
+
+    if abs(float(targets[0].TargetDiameter) - 4.0) > 1e-6:
+        FreeCAD.closeDocument(doc.Name)
+        raise AssertionError("circle target diameter was not resolved")
+
+    if (
+        abs(float(targets[1].TargetLength) - 4.0) > 1e-6
+        or abs(float(targets[1].TargetWidth) - 4.0) > 1e-6
+    ):
+        FreeCAD.closeDocument(doc.Name)
+        raise AssertionError("rectangle target size was not resolved")
+
+    if os.path.exists(output_path):
+        os.remove(output_path)
+
+    result = MBDExporter.export_ap242(output_path)
+    exists = os.path.exists(output_path)
+    size = os.path.getsize(output_path) if exists else 0
+
+    if result is not True:
+        FreeCAD.closeDocument(doc.Name)
+        raise AssertionError(
+            "area datum target export returned {}".format(result)
+        )
+
+    if not exists or size <= 0:
+        FreeCAD.closeDocument(doc.Name)
+        raise AssertionError(
+            "area datum target export did not create a non-empty STEP file"
+        )
+
+    with open(output_path, "r", encoding="utf-8", errors="replace") as handle:
+        step_text = handle.read().upper()
+
+    FreeCAD.closeDocument(doc.Name)
+
+    for target_type in ("CIRCLE", "RECTANGLE"):
+        if "PLACED_DATUM_TARGET_FEATURE('','{}'".format(target_type) not in step_text:
+            raise AssertionError(
+                "datum target export did not write {} target".format(
+                    target_type
+                )
+            )
+
+    if "/*   NUL REF   */" in step_text:
+        raise AssertionError("area datum target export wrote a null reference")
+
+    print("semantic area datum target export passed:", output_path, size)
+
+
 def datum_target_sufficiency_smoke():
     doc, box_obj = make_doc("MBDDatumTargetSufficiencySmoke")
-    datum_a, datum_b, _datum_c, _datum_system = make_datum_set(doc, box_obj)
+    datum_a, datum_b, datum_c, _datum_system = make_datum_set(doc, box_obj)
 
-    def add_target(datum, target_id, point):
+    def add_target(datum, target_id, point, target_type="Point"):
         construction = doc.addObject(
             "Part::Feature",
             "Construction_" + target_id
@@ -539,9 +815,12 @@ def datum_target_sufficiency_smoke():
         )
         MBDDatumTarget.MBDDatumTarget(target)
         target.TargetId = target_id
-        target.TargetType = "Point"
+        target.TargetType = target_type
         target.ParentDatum = datum
         target.ConstructionObject = construction
+        if target_type == "Circle":
+            target.TargetDiameter = 4.0
+            target.TargetLength = 4.0
         target.ReferencedObject = box_obj
         target.ReferencedSubelement = datum.ReferencedSubelement
         target.SurfaceTolerance = 999.0
@@ -590,10 +869,17 @@ def datum_target_sufficiency_smoke():
 
     add_target(datum_b, "B3", FreeCAD.Vector(10, 20, 0))
     secondary_complete = messages()
-    FreeCAD.closeDocument(doc.Name)
 
     if any("secondary datum B" in message for message in secondary_complete):
+        FreeCAD.closeDocument(doc.Name)
         raise AssertionError("two secondary datum targets did not clear validation")
+
+    add_target(datum_c, "C1", FreeCAD.Vector(20, 0, 0), "Circle")
+    tertiary_complete = messages()
+    FreeCAD.closeDocument(doc.Name)
+
+    if any("tertiary datum C" in message for message in tertiary_complete):
+        raise AssertionError("circular tertiary datum target did not clear validation")
 
     FreeCAD.Console.PrintMessage(
         "datum target sufficiency validation passed\n"
@@ -919,6 +1205,9 @@ def single_item_fcf_layout_smoke():
     fcf.ToleranceType = "Position"
     fcf.ToleranceValue = 0.127
     fcf.DiameterZone = True
+    fcf.MaterialConditionModifier = "MMC"
+    fcf.ProjectedToleranceZone = True
+    fcf.ProjectedToleranceHeight = 6.35
     fcf.DatumReference = datum_a
     fcf.ControlledObject = box_obj
     fcf.ControlledSubelement = "Face2"
@@ -931,13 +1220,21 @@ def single_item_fcf_layout_smoke():
     )
 
     cells = view_provider_fcf_cells(fcf)
+    tolerance_parts = cells[1][1]
 
     if [kind for kind, _text in cells] != [
         "symbol",
-        "diameter",
+        "tolerance",
         "text",
     ]:
         raise AssertionError("unexpected single-item FCF cells: {}".format(cells))
+
+    if fcf_tolerance_width(tolerance_parts, 4.0) > 34.0:
+        raise AssertionError(
+            "FCF modifier tolerance cell is too wide: {}".format(
+                fcf_tolerance_width(tolerance_parts, 4.0)
+            )
+        )
 
     for symbol_name in (
         "Position",
@@ -953,6 +1250,9 @@ def single_item_fcf_layout_smoke():
         "Circular Runout",
         "Total Runout",
         "Diameter",
+        "Modifier M",
+        "Modifier L",
+        "Modifier P",
     ):
         if not symbol_segments(symbol_name):
             raise AssertionError(
@@ -1516,6 +1816,44 @@ def single_item_dimension_layout_smoke():
             "single-item basic dimension claims helper children"
         )
 
+    angular = doc.addObject(
+        "App::DocumentObjectGroupPython",
+        "MBD_Dimension_Angular"
+    )
+    MBDDimension.MBDDimension(angular)
+    angular.DimensionPurpose = "Basic"
+    angular.DimensionKind = "Angular"
+    angular.MeasurementType = "Distance"
+    angular.NominalValue = 90.0
+    angular.ReferenceObject1 = box_obj
+    angular.ReferenceSubelement1 = "Face1"
+    angular.ReferenceObject2 = box_obj
+    angular.ReferenceSubelement2 = "Face3"
+    angular.ReferencePattern = "PlaneToPlaneAngle"
+
+    if MBDDimension.dimension_display_label(angular) != "90°":
+        raise AssertionError(
+            "basic angular dimension label was {}".format(
+                MBDDimension.dimension_display_label(angular)
+            )
+        )
+
+    update_pmi_display_layout(
+        angular,
+        FreeCAD.Vector(8, 8, 18),
+        FreeCAD.Vector(0, 0, 1),
+        FreeCAD.Vector(1, 0, 0),
+        3.0
+    )
+    fake_angular_view = FakeViewObject(angular)
+    angular_provider = ViewProviderSingleItemDimension(fake_angular_view)
+    angular_provider.attach(fake_angular_view)
+
+    if angular_provider.geometry.getNumChildren() < 5:
+        raise AssertionError(
+            "single-item angular dimension scene graph is incomplete"
+        )
+
     FreeCAD.closeDocument(doc.Name)
     print("single-item dimension layout passed")
 
@@ -1690,6 +2028,12 @@ def first_face_of_type(obj, type_name):
 def fcf_rule_validation_smoke():
     doc, box_obj = make_doc("MBDFCFRuleValidationSmoke")
     datum_a = make_datum(doc, box_obj, "A", "Face1")
+
+    def cell_text(cells):
+        return " ".join(
+            str(cell[1]) if isinstance(cell, tuple) and len(cell) > 1 else str(cell)
+            for cell in cells
+        )
 
     cyl = doc.addObject("Part::Feature", "RuleCylinder")
     cyl.Shape = Part.makeCylinder(
@@ -1891,6 +2235,93 @@ def fcf_rule_validation_smoke():
                     "; ".join(errors)
                 )
             )
+
+    modifier_valid = make_fcf(
+        "MBD_FCF_Position_Modifier_Valid",
+        "Position",
+        cyl,
+        cylinder_face,
+        None,
+        datum_system_axis
+    )
+    modifier_valid.DiameterZone = True
+    modifier_valid.MaterialConditionModifier = "MMC"
+    modifier_valid.ProjectedToleranceZone = True
+    modifier_valid.ProjectedToleranceHeight = 5.0
+    modifier_errors = MBDValidation.validate_fcf(modifier_valid)
+    modifier_cells = view_provider_fcf_cells(modifier_valid)
+    if modifier_errors:
+        FreeCAD.closeDocument(doc.Name)
+        raise AssertionError(
+            "position MMC/projected zone should be valid: {}".format(
+                "; ".join(modifier_errors)
+            )
+        )
+    modifier_text = cell_text(modifier_cells)
+    if "Modifier M" not in modifier_text or "Modifier P" not in modifier_text:
+        FreeCAD.closeDocument(doc.Name)
+        raise AssertionError(
+            "position modifier FCF cell did not include MMC/projected zone: {}".format(
+                modifier_cells
+            )
+        )
+
+    modifier_invalid = make_fcf(
+        "MBD_FCF_Flatness_Modifier_Invalid",
+        "Flatness",
+        box_obj,
+        "Face1"
+    )
+    modifier_invalid.MaterialConditionModifier = "MMC"
+    modifier_invalid.ProjectedToleranceZone = True
+    modifier_invalid.ProjectedToleranceHeight = 0.0
+    invalid_errors = MBDValidation.validate_fcf(modifier_invalid)
+    if not invalid_errors:
+        FreeCAD.closeDocument(doc.Name)
+        raise AssertionError(
+            "flatness with MMC/projected zone should be rejected"
+        )
+
+    unequal_valid = make_fcf(
+        "MBD_FCF_Profile_Unequal_Valid",
+        "Profile",
+        box_obj,
+        "Face1"
+    )
+    unequal_valid.UnequallyDisposedZone = True
+    unequal_valid.UnequallyDisposedOffset = 0.5
+    unequal_errors = MBDValidation.validate_fcf(unequal_valid)
+    unequal_cells = view_provider_fcf_cells(unequal_valid)
+    if unequal_errors:
+        FreeCAD.closeDocument(doc.Name)
+        raise AssertionError(
+            "profile unequal disposition should be valid: {}".format(
+                "; ".join(unequal_errors)
+            )
+        )
+    if "UZ" not in cell_text(unequal_cells):
+        FreeCAD.closeDocument(doc.Name)
+        raise AssertionError(
+            "profile FCF cell did not include unequal disposition: {}".format(
+                unequal_cells
+            )
+        )
+
+    unequal_invalid = make_fcf(
+        "MBD_FCF_Position_Unequal_Invalid",
+        "Position",
+        cyl,
+        cylinder_face,
+        None,
+        datum_system_axis
+    )
+    unequal_invalid.UnequallyDisposedZone = True
+    unequal_invalid.UnequallyDisposedOffset = 0.5
+    if not MBDValidation.validate_fcf(unequal_invalid):
+        FreeCAD.closeDocument(doc.Name)
+        raise AssertionError(
+            "position with unequal disposition should be rejected"
+        )
 
     FreeCAD.closeDocument(doc.Name)
     FreeCAD.Console.PrintMessage("FCF rule validation passed\n")
@@ -3303,14 +3734,17 @@ def main():
             "datum-only",
             "fcf-no-diameter",
             "fcf-diameter",
+            "fcf-material-modifier",
             "all-fcfs",
             "stale-cancel",
+            "ap242-pmi-scan",
             "basic-dimension-projection",
             "semantic-dimension",
             "dimension-semantic-rules",
             "dimension-export",
             "datum-target-export",
             "line-datum-target-export",
+            "area-datum-target-export",
             "datum-target-sufficiency",
             "mixed-datum-target-sufficiency",
             "common-datum-system-validation",
@@ -3357,6 +3791,8 @@ def main():
 
     if args.mode == "basic-dimension-projection":
         basic_dimension_projection_smoke()
+    elif args.mode == "ap242-pmi-scan":
+        ap242_pmi_scan_smoke(args.output)
     elif args.mode == "semantic-dimension":
         semantic_dimension_smoke()
     elif args.mode == "dimension-semantic-rules":
@@ -3367,6 +3803,8 @@ def main():
         datum_target_export_smoke(args.output)
     elif args.mode == "line-datum-target-export":
         line_datum_target_export_smoke(args.output)
+    elif args.mode == "area-datum-target-export":
+        area_datum_target_export_smoke(args.output)
     elif args.mode == "datum-target-sufficiency":
         datum_target_sufficiency_smoke()
     elif args.mode == "mixed-datum-target-sufficiency":

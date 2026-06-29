@@ -1,5 +1,4 @@
 import math
-import time
 
 import FreeCAD
 import FreeCADGui
@@ -156,6 +155,23 @@ def symbol_segments(symbol_name):
     elif symbol_name == "Diameter":
         circle(0.50, 0.50, 0.26)
         line(0.28, 0.22, 0.72, 0.78)
+    elif symbol_name == "Modifier M":
+        circle(0.50, 0.50, 0.34)
+        line(0.28, 0.28, 0.28, 0.72)
+        line(0.28, 0.72, 0.50, 0.42)
+        line(0.50, 0.42, 0.72, 0.72)
+        line(0.72, 0.72, 0.72, 0.28)
+    elif symbol_name == "Modifier L":
+        circle(0.50, 0.50, 0.34)
+        line(0.34, 0.72, 0.34, 0.28)
+        line(0.34, 0.28, 0.68, 0.28)
+    elif symbol_name == "Modifier P":
+        circle(0.50, 0.50, 0.34)
+        line(0.34, 0.28, 0.34, 0.72)
+        line(0.34, 0.72, 0.62, 0.72)
+        line(0.62, 0.72, 0.72, 0.62)
+        line(0.72, 0.62, 0.62, 0.52)
+        line(0.62, 0.52, 0.34, 0.52)
 
     return segments
 
@@ -182,10 +198,41 @@ def fcf_cells(obj):
         obj.ToleranceValue,
         FreeCAD.Units.Length
     ).UserString
+    tolerance_parts = []
+
+    if getattr(obj, "DiameterZone", False):
+        tolerance_parts.append(("symbol", "Diameter"))
+
+    tolerance_parts.append(("text", tolerance))
+
+    material_modifier = str(
+        getattr(obj, "MaterialConditionModifier", "None")
+    )
+
+    if material_modifier == "MMC":
+        tolerance_parts.append(("symbol", "Modifier M"))
+    elif material_modifier == "LMC":
+        tolerance_parts.append(("symbol", "Modifier L"))
+
+    if getattr(obj, "ProjectedToleranceZone", False):
+        projected_height = FreeCAD.Units.Quantity(
+            getattr(obj, "ProjectedToleranceHeight", 0.0),
+            FreeCAD.Units.Length
+        ).UserString
+        tolerance_parts.append(("symbol", "Modifier P"))
+        tolerance_parts.append(("text", projected_height))
+
+    if getattr(obj, "UnequallyDisposedZone", False):
+        offset = FreeCAD.Units.Quantity(
+            getattr(obj, "UnequallyDisposedOffset", 0.0),
+            FreeCAD.Units.Length
+        ).UserString
+        tolerance_parts.append(("text", "UZ"))
+        tolerance_parts.append(("text", offset))
+
     cells = [
         ("symbol", fcf_symbol_name(obj.ToleranceType)),
-        ("diameter" if getattr(obj, "DiameterZone", False) else "text",
-         tolerance),
+        ("tolerance", tolerance_parts),
     ]
 
     if (
@@ -247,6 +294,65 @@ def fcf_attachment_point(obj):
         return nearest_point_on_shape(controlled, preferred_point)
     except Exception:
         return None
+
+
+# Tolerance cells mix Coin text with stroke-drawn symbols. Coin text has broad
+# font metrics, so these factors intentionally use the apparent visual width
+# rather than TEXT_WIDTH_FACTOR; otherwise MMC/projected-zone cells develop
+# large gaps between symbols and numbers.
+FCF_TOLERANCE_SYMBOL_WIDTH_FACTOR = 0.62
+FCF_TOLERANCE_TEXT_WIDTH_FACTOR = 0.36
+FCF_TOLERANCE_PART_GAP_FACTOR = 0.05
+
+
+def fcf_tolerance_part_width(part, height):
+    kind, value = part
+
+    if kind == "symbol":
+        return height * FCF_TOLERANCE_SYMBOL_WIDTH_FACTOR
+
+    return max(
+        len(str(value)) * height * FCF_TOLERANCE_TEXT_WIDTH_FACTOR,
+        height * 0.6
+    )
+
+
+def fcf_tolerance_part_gap(height):
+    return height * FCF_TOLERANCE_PART_GAP_FACTOR
+
+
+def fcf_tolerance_width(parts, height):
+    if not parts:
+        return height * 1.6
+
+    gap = fcf_tolerance_part_gap(height)
+    return sum(
+        fcf_tolerance_part_width(part, height)
+        for part in parts
+    ) + gap * (len(parts) - 1)
+
+
+def add_inline_text(parent, text, origin, x_axis, y_axis, normal, height):
+    text_sep = coin.SoSeparator()
+    transform = coin.SoTransform()
+    transform.translation.setValue(origin.x, origin.y, origin.z)
+    rotation = FreeCAD.Rotation(x_axis, y_axis, normal, "XYZ")
+    quaternion = rotation.Q
+    transform.rotation.setValue(
+        quaternion[0],
+        quaternion[1],
+        quaternion[2],
+        quaternion[3]
+    )
+    font_style = coin.SoVRMLFontStyle()
+    font_style.size = height * 0.72
+    font_style.justify.setValues(0, 2, ["BEGIN", "MIDDLE"])
+    text_node = coin.SoVRMLText()
+    text_node.string = str(text)
+    text_node.fontStyle = font_style
+    text_sep.addChild(transform)
+    text_sep.addChild(text_node)
+    parent.addChild(text_sep)
 
 
 def fcf_leader_segments(obj, attachment, origin, height):
@@ -343,26 +449,13 @@ def make_selection_node():
 class ViewProviderSingleItemFCF:
 
     def __init__(self, vobj, suspend_rebuild=False):
-        timing_started = time.perf_counter()
         self.Object = vobj.Object
         self._initialize_runtime_state()
         self._suspend_rebuild = bool(
             suspend_rebuild
             or getattr(self, "_suspend_rebuild", False)
         )
-        timing_initialized = time.perf_counter()
         vobj.Proxy = self
-        timing_proxy_assigned = time.perf_counter()
-
-        if timing_proxy_assigned - timing_started > 1.0:
-            FreeCAD.Console.PrintMessage(
-                "Annotation provider constructor for {}: initialize {:.3f}s, "
-                "proxy assignment {:.3f}s\n".format(
-                    self.Object.Name,
-                    timing_initialized - timing_started,
-                    timing_proxy_assigned - timing_initialized
-                )
-            )
 
     def _initialize_runtime_state(self):
         self.root = None
@@ -434,7 +527,6 @@ class ViewProviderSingleItemFCF:
             return False
 
     def attach(self, vobj):
-        timing_started = time.perf_counter()
         self._ensure_runtime_state()
         self.Object = vobj.Object
         ensure_pmi_display_layout(self.Object)
@@ -442,17 +534,14 @@ class ViewProviderSingleItemFCF:
         if float(self.Object.AnnotationTextHeight) <= 0:
             self.Object.AnnotationTextHeight = 3.0
 
-        timing_layout_ready = time.perf_counter()
         self.root = make_selection_node()
         self.uses_selection_display_mode = self.root is not None
-        timing_selection_ready = time.perf_counter()
 
         if self.root is None:
             self.root = coin.SoSeparator()
 
         self.geometry = coin.SoSeparator()
         self.root.addChild(self.geometry)
-        timing_graph_ready = time.perf_counter()
 
         if self.uses_selection_display_mode:
             vobj.addDisplayMode(self.root, ANNOTATION_DISPLAY_MODE)
@@ -464,27 +553,10 @@ class ViewProviderSingleItemFCF:
         else:
             vobj.RootNode.addChild(self.root)
 
-        timing_mode_ready = time.perf_counter()
         if not getattr(self, "_suspend_rebuild", False):
             self.rebuild()
-        timing_rebuilt = time.perf_counter()
-        self.ensure_direct_interaction(vobj, verbose=False)
-        timing_interaction_ready = time.perf_counter()
 
-        if timing_interaction_ready - timing_started > 1.0:
-            FreeCAD.Console.PrintMessage(
-                "Annotation attach phases for {}: layout {:.3f}s, "
-                "selection {:.3f}s, graph {:.3f}s, mode {:.3f}s, "
-                "geometry {:.3f}s, interaction {:.3f}s\n".format(
-                    self.Object.Name,
-                    timing_layout_ready - timing_started,
-                    timing_selection_ready - timing_layout_ready,
-                    timing_graph_ready - timing_selection_ready,
-                    timing_mode_ready - timing_graph_ready,
-                    timing_rebuilt - timing_mode_ready,
-                    timing_interaction_ready - timing_rebuilt
-                )
-            )
+        self.ensure_direct_interaction(vobj, verbose=False)
 
     def ensure_direct_interaction(self, vobj, verbose=False):
         self._ensure_runtime_state()
@@ -572,11 +644,8 @@ class ViewProviderSingleItemFCF:
         for kind, text in cells:
             if kind == "symbol":
                 width = height * 1.6
-            elif kind == "diameter":
-                width = max(
-                    len(text) * height * TEXT_WIDTH_FACTOR + height,
-                    height * 2.2
-                )
+            elif kind == "tolerance":
+                width = max(fcf_tolerance_width(text, height), height * 2.2)
             else:
                 width = max(
                     len(text) * height * TEXT_WIDTH_FACTOR,
@@ -626,9 +695,9 @@ class ViewProviderSingleItemFCF:
         for index, (kind, text) in enumerate(cells):
             span = spans[index]
 
-            if kind in ("symbol", "diameter"):
-                symbol = text if kind == "symbol" else "Diameter"
-                symbol_size = height * (0.95 if kind == "symbol" else 0.75)
+            if kind == "symbol":
+                symbol = text
+                symbol_size = height * 0.95
                 symbol_x = x + padding * 0.5
                 symbol_y = (frame_height - symbol_size) * 0.5
 
@@ -646,11 +715,55 @@ class ViewProviderSingleItemFCF:
                         )
                     ))
 
-            if kind != "symbol":
-                text_x = x + padding
+            if kind == "tolerance":
+                cursor = x + padding
+                gap = fcf_tolerance_part_gap(height)
 
-                if kind == "diameter":
-                    text_x += height
+                for part_kind, part_value in text:
+                    part_width = fcf_tolerance_part_width(
+                        (part_kind, part_value),
+                        height
+                    )
+
+                    if part_kind == "symbol":
+                        symbol_size = height * 0.75
+                        symbol_y = (frame_height - symbol_size) * 0.5
+
+                        for start, end in symbol_segments(part_value):
+                            segments.append((
+                                local_point(
+                                    origin, x_axis, y_axis,
+                                    cursor + start[0] * symbol_size,
+                                    symbol_y + start[1] * symbol_size
+                                ),
+                                local_point(
+                                    origin, x_axis, y_axis,
+                                    cursor + end[0] * symbol_size,
+                                    symbol_y + end[1] * symbol_size
+                                )
+                            ))
+                    else:
+                        text_origin = local_point(
+                            origin,
+                            x_axis,
+                            y_axis,
+                            cursor,
+                            frame_height * 0.5
+                        )
+                        add_inline_text(
+                            self.geometry,
+                            part_value,
+                            text_origin,
+                            x_axis,
+                            y_axis,
+                            _normal,
+                            height
+                        )
+
+                    cursor += part_width + gap
+
+            elif kind != "symbol":
+                text_x = x + padding
 
                 text_origin = local_point(
                     origin,
@@ -659,35 +772,15 @@ class ViewProviderSingleItemFCF:
                     text_x,
                     frame_height * 0.5
                 )
-                text_sep = coin.SoSeparator()
-                transform = coin.SoTransform()
-                transform.translation.setValue(
-                    text_origin.x,
-                    text_origin.y,
-                    text_origin.z
-                )
-                rotation = FreeCAD.Rotation(
+                add_inline_text(
+                    self.geometry,
+                    text,
+                    text_origin,
                     x_axis,
                     y_axis,
                     _normal,
-                    "XYZ"
+                    height
                 )
-                quaternion = rotation.Q
-                transform.rotation.setValue(
-                    quaternion[0],
-                    quaternion[1],
-                    quaternion[2],
-                    quaternion[3]
-                )
-                font_style = coin.SoVRMLFontStyle()
-                font_style.size = height * 0.72
-                font_style.justify.setValues(0, 2, ["BEGIN", "MIDDLE"])
-                text_node = coin.SoVRMLText()
-                text_node.string = text
-                text_node.fontStyle = font_style
-                text_sep.addChild(transform)
-                text_sep.addChild(text_node)
-                self.geometry.addChild(text_sep)
 
             x += span
 
@@ -708,6 +801,11 @@ class ViewProviderSingleItemFCF:
             "ToleranceValue",
             "DiameterZone",
             "ProfileAllOver",
+            "MaterialConditionModifier",
+            "ProjectedToleranceZone",
+            "ProjectedToleranceHeight",
+            "UnequallyDisposedZone",
+            "UnequallyDisposedOffset",
             "DatumSystem",
             "DatumReference",
             "ControlledObject",
@@ -1114,10 +1212,81 @@ class ViewProviderSingleItemDatumTarget(ViewProviderSingleItemFCF):
         marker_radius = height * 0.28
         segments = [(point, origin)]
 
-        if str(getattr(obj, "TargetType", "Point")) == "Line":
+        target_type = str(getattr(obj, "TargetType", "Point"))
+
+        if target_type == "Line":
             start = FreeCAD.Vector(obj.TargetEndPoint1)
             end = FreeCAD.Vector(obj.TargetEndPoint2)
             segments.append((start, end))
+        elif target_type == "Circle":
+            radius = max(float(getattr(obj, "TargetDiameter", 0.0)) * 0.5, marker_radius)
+            marker_points = arc_points(
+                0,
+                0,
+                radius,
+                radius,
+                0,
+                360,
+                48
+            )
+
+            for start, end in zip(marker_points, marker_points[1:]):
+                segments.append((
+                    local_point(
+                        point,
+                        x_axis,
+                        y_axis,
+                        start[0],
+                        start[1]
+                    ),
+                    local_point(
+                        point,
+                        x_axis,
+                        y_axis,
+                        end[0],
+                        end[1]
+                    )
+                ))
+        elif target_type == "Rectangle":
+            length = max(float(getattr(obj, "TargetLength", 0.0)), marker_radius * 2.0)
+            width = max(float(getattr(obj, "TargetWidth", 0.0)), marker_radius * 2.0)
+            corners = [
+                local_point(point, x_axis, y_axis, -length * 0.5, -width * 0.5),
+                local_point(point, x_axis, y_axis, length * 0.5, -width * 0.5),
+                local_point(point, x_axis, y_axis, length * 0.5, width * 0.5),
+                local_point(point, x_axis, y_axis, -length * 0.5, width * 0.5),
+            ]
+
+            for start, end in zip(corners, corners[1:] + corners[:1]):
+                segments.append((start, end))
+        elif target_type == "Area":
+            marker_points = arc_points(
+                0,
+                0,
+                marker_radius * 1.4,
+                marker_radius * 1.4,
+                0,
+                360,
+                32
+            )
+
+            for start, end in zip(marker_points, marker_points[1:]):
+                segments.append((
+                    local_point(
+                        point,
+                        x_axis,
+                        y_axis,
+                        start[0],
+                        start[1]
+                    ),
+                    local_point(
+                        point,
+                        x_axis,
+                        y_axis,
+                        end[0],
+                        end[1]
+                    )
+                ))
         else:
             segments.extend([
                 (
@@ -1193,6 +1362,9 @@ class ViewProviderSingleItemDatumTarget(ViewProviderSingleItemFCF):
             "TargetPoint",
             "TargetEndPoint1",
             "TargetEndPoint2",
+            "TargetDiameter",
+            "TargetLength",
+            "TargetWidth",
             "AnnotationOrigin",
             "AnnotationNormal",
             "AnnotationDirection",
@@ -1302,13 +1474,24 @@ def dimension_display_data(obj):
             obj.ReferenceObject2,
             obj.ReferenceSubelement2
         )
-        return {
+        data = {
             "kind": str(obj.DimensionKind),
             "label": dimension_display_label(obj),
             "point1": measurement.get("point1"),
             "point2": measurement.get("point2"),
             "boxed": str(obj.DimensionPurpose) == "Basic",
         }
+
+        if str(obj.DimensionKind) == "Angular":
+            for key in (
+                "angle_vertex",
+                "angle_ray1",
+                "angle_ray2",
+                "angle_normal",
+            ):
+                data[key] = measurement.get(key)
+
+        return data
 
     from MBDBasicDimension import display_points_from_references
 
@@ -1345,6 +1528,140 @@ def arrow_segments(tip, direction, side, length, width):
         (tip, base + half_width),
         (tip, base - half_width),
     ]
+
+
+def arc_world_points(vertex, ray1, ray2, normal, radius, steps=32):
+    start = FreeCAD.Vector(ray1)
+    end = FreeCAD.Vector(ray2)
+    axis = FreeCAD.Vector(normal)
+
+    if start.Length <= 1e-9 or end.Length <= 1e-9 or axis.Length <= 1e-9:
+        return []
+
+    start.normalize()
+    end.normalize()
+    axis.normalize()
+    dot = max(min(start.dot(end), 1.0), -1.0)
+    angle = math.acos(dot)
+
+    if angle <= 1e-9:
+        return []
+
+    if start.cross(end).dot(axis) < 0.0:
+        axis = axis.negative()
+
+    count = max(int(steps), 4)
+    points = []
+
+    for index in range(count + 1):
+        theta = angle * index / count
+        rotated = FreeCAD.Rotation(axis, math.degrees(theta)).multVec(start)
+        points.append(vertex + rotated * radius)
+
+    return points
+
+
+def angular_dimension_segments(data, height, origin=None):
+    vertex = data.get("angle_vertex")
+    ray1 = data.get("angle_ray1")
+    ray2 = data.get("angle_ray2")
+    normal = data.get("angle_normal")
+
+    if vertex is None or ray1 is None or ray2 is None or normal is None:
+        return None
+
+    vertex = FreeCAD.Vector(vertex)
+    ray1 = FreeCAD.Vector(ray1)
+    ray2 = FreeCAD.Vector(ray2)
+    normal = FreeCAD.Vector(normal)
+
+    if ray1.Length <= 1e-9 or ray2.Length <= 1e-9 or normal.Length <= 1e-9:
+        return None
+
+    ray1.normalize()
+    ray2.normalize()
+    normal.normalize()
+
+    if ray1.cross(ray2).dot(normal) < 0.0:
+        normal = normal.negative()
+
+    p1 = data.get("point1")
+    p2 = data.get("point2")
+    extent = max(height * 8.0, 1.0)
+
+    if p1 is not None:
+        extent = max(extent, (FreeCAD.Vector(p1) - vertex).Length)
+
+    if p2 is not None:
+        extent = max(extent, (FreeCAD.Vector(p2) - vertex).Length)
+
+    desired_text_origin = None
+    if origin is not None:
+        desired_text_origin = FreeCAD.Vector(origin)
+        offset = desired_text_origin - vertex
+        offset = offset - normal * offset.dot(normal)
+
+        if offset.Length > height * 2.0:
+            desired_text_origin = vertex + offset
+            radius = max(offset.Length - height * 1.5, height * 5.0)
+        else:
+            desired_text_origin = None
+
+    if desired_text_origin is None:
+        radius = max(extent * 0.45, height * 5.0)
+
+    extension_end = max(extent, radius + height * 2.5)
+    gap = height * 0.5
+    segments = [
+        (vertex + ray1 * gap, vertex + ray1 * extension_end),
+        (vertex + ray2 * gap, vertex + ray2 * extension_end),
+    ]
+    arc_points = arc_world_points(vertex, ray1, ray2, normal, radius)
+
+    if len(arc_points) < 2:
+        return None
+
+    segments.extend(zip(arc_points, arc_points[1:]))
+    arrow_length = height * 1.0
+    arrow_width = height * 0.38
+    tangent_start = normal.cross(ray1)
+    tangent_end = normal.cross(ray2)
+
+    if tangent_start.Length > 1e-9:
+        segments.extend(arrow_segments(
+            arc_points[0],
+            tangent_start,
+            ray1,
+            arrow_length,
+            arrow_width
+        ))
+
+    if tangent_end.Length > 1e-9:
+        segments.extend(arrow_segments(
+            arc_points[-1],
+            tangent_end.negative(),
+            ray2,
+            arrow_length,
+            arrow_width
+        ))
+
+    text_direction = ray1 + ray2
+
+    if desired_text_origin is not None:
+        text_origin = desired_text_origin
+    elif text_direction.Length <= 1e-9:
+        text_origin = vertex + ray1 * (radius + height * 1.5)
+    else:
+        text_direction.normalize()
+        text_origin = vertex + text_direction * (radius + height * 1.5)
+
+    return {
+        "segments": segments,
+        "text_origin": text_origin,
+        "x_axis": ray1,
+        "y_axis": normal.cross(ray1),
+        "normal": normal,
+    }
 
 
 def add_world_text(parent, origin, text, height, x_axis, y_axis, normal):
@@ -1424,7 +1741,18 @@ class ViewProviderSingleItemDimension(ViewProviderSingleItemFCF):
             height * 2.0
         )
 
-        if data["kind"] == "Radius":
+        if data["kind"] == "Angular":
+            angular_data = angular_dimension_segments(data, height, origin)
+
+            if angular_data is None:
+                return
+
+            segments.extend(angular_data["segments"])
+            text_origin = angular_data["text_origin"]
+            x_axis = angular_data["x_axis"]
+            y_axis = angular_data["y_axis"]
+            normal = angular_data["normal"]
+        elif data["kind"] == "Radius":
             surface_point = point2
             leader_direction = origin - surface_point
 

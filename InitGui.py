@@ -20,6 +20,7 @@ class MBDWorkbench(FreeCADGui.Workbench):
             "MBD_CreateDatumSystem",
             "MBD_CreateFeatureControlFrame",
             "MBD_CreateGDTSymbolTable",
+            "MBD_InspectAP242PMI",
             "MBD_ExportAP242",
         ])
 
@@ -32,6 +33,7 @@ class MBDWorkbench(FreeCADGui.Workbench):
             "MBD_CreateDatumSystem",
             "MBD_CreateFeatureControlFrame",
             "MBD_CreateGDTSymbolTable",
+            "MBD_InspectAP242PMI",
             "MBD_ExportAP242",
         ])
 

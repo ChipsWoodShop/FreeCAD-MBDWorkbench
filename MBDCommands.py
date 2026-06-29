@@ -2,7 +2,6 @@
 
 import math
 import os
-import time
 
 import FreeCAD
 import FreeCADGui
@@ -39,10 +38,14 @@ from MBDDatum import (
     update_geometry_signature
 )
 import MBDInspector
+import MBDImporter
 from MBDPMI import append_pmi_history, update_pmi_display_layout
 from MBDDatumTarget import (
     MBDDatumTarget,
     ViewProviderMBDDatumTarget,
+    area_geometry_from_target,
+    circle_geometry_from_target,
+    rectangle_geometry_from_target,
     straight_edge_geometry,
     target_surface_distance,
     update_datum_target_signature
@@ -120,6 +123,22 @@ def finite_vector(vector):
         and finite_number(vector.y)
         and finite_number(vector.z)
     )
+
+
+def parse_angle_degrees(text):
+    value_text = str(text).strip().lower()
+
+    if value_text.endswith("°"):
+        return float(value_text[:-1].strip())
+
+    for suffix in ("degrees", "degree", "deg"):
+        if value_text.endswith(suffix):
+            return float(value_text[:-len(suffix)].strip())
+
+    if value_text.endswith("rad"):
+        return math.degrees(float(value_text[:-3].strip()))
+
+    return float(value_text)
 
 
 def sane_bound_box(bbox):
@@ -505,6 +524,9 @@ def is_pmi_display_helper(obj):
 
 
 def clear_fcf_display_helpers(doc, fcf_obj):
+    # Current FCFs draw themselves through ViewProviderSingleItemFCF. These
+    # helpers are retained only to clean up documents created while FCFs were
+    # still represented by separate text/frame/leader objects.
     helpers = []
 
     for property_name in ("DisplayFrame", "DisplayText", "DisplayLeader"):
@@ -545,6 +567,9 @@ def clear_fcf_display_helpers(doc, fcf_obj):
 
 
 def clear_datum_target_display_helpers(doc, target_obj):
+    # Datum targets are now single view-provider objects. Old files may still
+    # contain a separate text child; remove it so the tree remains one semantic
+    # item per datum target.
     helper = getattr(target_obj, "DisplayText", None)
 
     try:
@@ -583,6 +608,9 @@ def clear_datum_target_display_helpers(doc, target_obj):
 
 
 def adopt_datum_layout_from_helpers(doc, datum_obj):
+    # Migration bridge: preserve a manually moved legacy datum label by copying
+    # its helper placement into the semantic Annotation* properties before the
+    # helper objects are deleted.
     text_obj = getattr(datum_obj, "DisplayText", None)
 
     if text_obj is None:
@@ -609,6 +637,9 @@ def adopt_datum_layout_from_helpers(doc, datum_obj):
 
 
 def clear_datum_display_helpers(doc, datum_obj):
+    # Datum display used to be a group of Part/Text helpers. The single-item
+    # provider regenerates triangle, leader, box, and label from Annotation*
+    # properties, so any stale helpers should be removed.
     helpers = []
 
     for property_name in (
@@ -721,6 +752,9 @@ def activate_datum_view_provider(doc, datum_obj):
 
 
 def adopt_dimension_layout_from_helpers(doc, dimension_obj):
+    # Migration bridge for dimensions created before the single-item view
+    # provider. If a text helper exists, use its placement as the persisted
+    # annotation origin before removing the helper objects.
     text_obj = getattr(dimension_obj, "DisplayText", None)
 
     if text_obj is None:
@@ -747,6 +781,9 @@ def adopt_dimension_layout_from_helpers(doc, dimension_obj):
 
 
 def clear_dimension_display_helpers(doc, dimension_obj):
+    # Dimensions now render their line, arrows, box, and text from the semantic
+    # object. This removes old helper objects while leaving semantic links
+    # intact.
     helpers = []
 
     for property_name in (
@@ -795,15 +832,15 @@ def activate_dimension_view_provider(
     dimension_obj,
     resolved_display_data=None
 ):
-    timing_started = time.perf_counter()
+    # The dimension provider may need resolved geometry that is expensive or
+    # selection-dependent. Pass it in for the first rebuild instead of letting
+    # the provider rediscover it from topology.
     adopt_dimension_layout_from_helpers(doc, dimension_obj)
-    timing_adopted = time.perf_counter()
     proxy = getattr(
         getattr(dimension_obj, "ViewObject", None),
         "Proxy",
         None
     )
-    timing_proxy_read = time.perf_counter()
     created_provider = False
 
     if not hasattr(proxy, "rebuild"):
@@ -821,8 +858,6 @@ def activate_dimension_view_provider(
         proxy = getattr(dimension_obj.ViewObject, "Proxy", None)
         created_provider = True
 
-    timing_provider_created = time.perf_counter()
-
     if (
         not created_provider
         and resolved_display_data is not None
@@ -831,31 +866,15 @@ def activate_dimension_view_provider(
         proxy._resolved_display_data = resolved_display_data
 
     clear_dimension_display_helpers(doc, dimension_obj)
-    timing_helpers_cleared = time.perf_counter()
 
     if proxy is not None:
         proxy._suspend_rebuild = False
 
-    # Assigning a new view provider invokes attach(), which performs the
-    # initial rebuild using resolved_display_data. Rebuilding again here
-    # duplicated all scene-graph work and could force another geometry query.
+    # Assigning a new view provider invokes attach(), which performs the initial
+    # rebuild using resolved_display_data. Rebuilding again here duplicated all
+    # scene-graph work and could force another geometry query.
     if not created_provider and hasattr(proxy, "rebuild"):
         proxy.rebuild()
-
-    timing_rebuilt = time.perf_counter()
-
-    if timing_rebuilt - timing_started > 1.0:
-        FreeCAD.Console.PrintMessage(
-            "Dimension provider phases for {}: adopt {:.3f}s, lookup {:.3f}s, "
-            "construct {:.3f}s, cleanup {:.3f}s, rebuild {:.3f}s\n".format(
-                dimension_obj.Name,
-                timing_adopted - timing_started,
-                timing_proxy_read - timing_adopted,
-                timing_provider_created - timing_proxy_read,
-                timing_helpers_cleared - timing_provider_created,
-                timing_rebuilt - timing_helpers_cleared
-            )
-        )
 
     return proxy
 
@@ -2165,6 +2184,23 @@ def make_gdt_symbol_geometry(doc, symbol_name, point, size, rotation=None, objec
         elif symbol_name == "Diameter":
             add_circle(0.50, 0.50, 0.26)
             add_line(0.28, 0.22, 0.72, 0.78)
+        elif symbol_name == "Modifier M":
+            add_circle(0.50, 0.50, 0.34)
+            add_line(0.28, 0.28, 0.28, 0.72)
+            add_line(0.28, 0.72, 0.50, 0.42)
+            add_line(0.50, 0.42, 0.72, 0.72)
+            add_line(0.72, 0.72, 0.72, 0.28)
+        elif symbol_name == "Modifier L":
+            add_circle(0.50, 0.50, 0.34)
+            add_line(0.34, 0.72, 0.34, 0.28)
+            add_line(0.34, 0.28, 0.68, 0.28)
+        elif symbol_name == "Modifier P":
+            add_circle(0.50, 0.50, 0.34)
+            add_line(0.34, 0.28, 0.34, 0.72)
+            add_line(0.34, 0.72, 0.62, 0.72)
+            add_line(0.62, 0.72, 0.72, 0.62)
+            add_line(0.72, 0.62, 0.62, 0.52)
+            add_line(0.62, 0.52, 0.34, 0.52)
         else:
             add_circle(0.50, 0.50, 0.25)
 
@@ -2618,6 +2654,27 @@ def fcf_cells(fcf_obj):
     if getattr(fcf_obj, "DiameterZone", False):
         tolerance = "⌀ " + tolerance
 
+    material_modifier = str(
+        getattr(fcf_obj, "MaterialConditionModifier", "None")
+    )
+
+    if material_modifier in ("MMC", "LMC"):
+        tolerance += " " + ("Ⓜ" if material_modifier == "MMC" else "Ⓛ")
+
+    if getattr(fcf_obj, "ProjectedToleranceZone", False):
+        projected_height = FreeCAD.Units.Quantity(
+            getattr(fcf_obj, "ProjectedToleranceHeight", 0.0),
+            FreeCAD.Units.Length
+        ).UserString
+        tolerance += " Ⓟ {}".format(projected_height)
+
+    if getattr(fcf_obj, "UnequallyDisposedZone", False):
+        offset = FreeCAD.Units.Quantity(
+            getattr(fcf_obj, "UnequallyDisposedOffset", 0.0),
+            FreeCAD.Units.Length
+        ).UserString
+        tolerance += " UZ {}".format(offset)
+
     cells = [
         fcf_tolerance_symbol(fcf_obj.ToleranceType),
         tolerance,
@@ -2918,6 +2975,9 @@ def fcf_origin_below_dimension(doc, fcf_obj, text_height, fallback_origin, fallb
 
 
 def create_fcf_display(doc, fcf_obj):
+    # Public display entry point used by commands and tests. In GUI mode the
+    # preferred result is a single semantic FCF object with a view provider; the
+    # helper-object branch below exists as a fallback for legacy/headless paths.
     point = referenced_subelement_center(
         fcf_obj.ControlledObject,
         fcf_obj.ControlledSubelement
@@ -2932,6 +2992,9 @@ def create_fcf_display(doc, fcf_obj):
         )
 
         if position_cylinder is not None:
+            # For holes, attach the FCF at the visible/open end of the axis so
+            # position callouts read with the diameter dimension instead of
+            # pointing through the solid.
             point = position_cylinder["point"]
             normal = position_cylinder.get("opening_direction")
 
@@ -3003,6 +3066,9 @@ def create_fcf_display(doc, fcf_obj):
         )
 
     if str(fcf_obj.ToleranceType) == "Position":
+        # If the controlled feature already has a diameter dimension, ASME
+        # presentation convention places the FCF below that dimension rather
+        # than drawing a separate leader back to the hole axis.
         frame_origin, rotation = fcf_origin_below_dimension(
             doc,
             fcf_obj,
@@ -3423,7 +3489,9 @@ def create_dimension_object(
     text_height=None,
     resolved_measurement=None
 ):
-    timing_started = time.perf_counter()
+    # Dimension creation resolves geometry once, then passes the resolved
+    # points/angle data into the view provider. That avoids a second topology
+    # lookup during provider attach and keeps interactive creation responsive.
     measurement = resolved_measurement
 
     if measurement is None:
@@ -3450,15 +3518,26 @@ def create_dimension_object(
     )
 
     if FreeCAD.GuiUp:
+        initial_display_data = {
+            "kind": str(dimension_kind),
+            "label": "",
+            "point1": measurement.get("point1"),
+            "point2": measurement.get("point2"),
+            "boxed": str(dimension_purpose) == "Basic",
+        }
+
+        if str(dimension_kind) == "Angular":
+            for key in (
+                "angle_vertex",
+                "angle_ray1",
+                "angle_ray2",
+                "angle_normal",
+            ):
+                initial_display_data[key] = measurement.get(key)
+
         ViewProviderMBDDimension(
             dim_obj.ViewObject,
-            {
-                "kind": str(dimension_kind),
-                "label": "",
-                "point1": measurement.get("point1"),
-                "point2": measurement.get("point2"),
-                "boxed": str(dimension_purpose) == "Basic",
-            },
+            initial_display_data,
             suspend_rebuild=True
         )
 
@@ -3479,13 +3558,17 @@ def create_dimension_object(
     dim_obj.ReferenceSubelement2 = ref_sub_2
     dim_obj.ReferencePattern = measurement.get("pattern", "")
     dim_obj.ValidationMessage = measurement.get("message", "")
-    timing_object_ready = time.perf_counter()
 
     if (
         str(dimension_kind) in ("Diameter", "Radius")
         or str(dim_obj.ReferencePattern) == "PlaneToPlane"
     ):
         dim_obj.AP242Entity = "DIMENSIONAL_SIZE"
+    elif str(dimension_kind) == "Angular":
+        if str(dim_obj.ReferencePattern) in ("PlaneToPlaneAngle", "AxisToAxisAngle"):
+            dim_obj.AP242Entity = "ANGULAR_SIZE"
+        else:
+            dim_obj.AP242Entity = "ANGULAR_LOCATION"
     elif str(dimension_purpose) == "Basic":
         dim_obj.AP242Entity = "DIMENSIONAL_LOCATION"
     elif str(measurement_type) == "Distance":
@@ -3496,7 +3579,6 @@ def create_dimension_object(
     update_dimension_signature(dim_obj, measurement)
     append_pmi_history(dim_obj, "dimension-attached")
     add_to_mbd_pmi_group(doc, dim_obj)
-    timing_metadata_ready = time.perf_counter()
 
     if FreeCAD.GuiUp:
         p1 = measurement.get("point1")
@@ -3568,31 +3650,28 @@ def create_dimension_object(
                     text_height
                 )
 
-        timing_layout_ready = time.perf_counter()
+        final_display_data = {
+            "kind": str(dimension_kind),
+            "label": dimension_display_label(dim_obj),
+            "point1": measurement.get("point1"),
+            "point2": measurement.get("point2"),
+            "boxed": str(dimension_purpose) == "Basic",
+        }
+
+        if str(dimension_kind) == "Angular":
+            for key in (
+                "angle_vertex",
+                "angle_ray1",
+                "angle_ray2",
+                "angle_normal",
+            ):
+                final_display_data[key] = measurement.get(key)
+
         activate_dimension_view_provider(
             doc,
             dim_obj,
-            {
-                "kind": str(dimension_kind),
-                "label": dimension_display_label(dim_obj),
-                "point1": measurement.get("point1"),
-                "point2": measurement.get("point2"),
-                "boxed": str(dimension_purpose) == "Basic",
-            }
+            final_display_data
         )
-        timing_provider_ready = time.perf_counter()
-
-        if timing_provider_ready - timing_started > 1.0:
-            FreeCAD.Console.PrintMessage(
-                "Dimension creation phases for {}: object {:.3f}s, "
-                "metadata {:.3f}s, layout {:.3f}s, provider {:.3f}s\n".format(
-                    dim_obj.Name,
-                    timing_object_ready - timing_started,
-                    timing_metadata_ready - timing_object_ready,
-                    timing_layout_ready - timing_metadata_ready,
-                    timing_provider_ready - timing_layout_ready
-                )
-            )
 
     return dim_obj
 
@@ -3975,7 +4054,7 @@ class CreateDatumTargetCommand:
     def GetResources(self):
         return {
             "MenuText": "Create Datum Target",
-            "ToolTip": "Create a semantic point or line datum target",
+            "ToolTip": "Create a semantic point, line, circular, rectangular, or area datum target",
             "Pixmap": command_icon("create_datum_target.svg")
         }
 
@@ -3990,7 +4069,7 @@ class CreateDatumTargetCommand:
             QtGui.QMessageBox.warning(
                 None,
                 "Datum Target",
-                "Select one MBD datum feature and one construction point or straight edge."
+                "Select one MBD datum feature and one target point, straight edge, or target-area face."
             )
             return
 
@@ -4007,7 +4086,7 @@ class CreateDatumTargetCommand:
             QtGui.QMessageBox.warning(
                 None,
                 "Datum Target",
-                "Selection must include one MBD datum feature and one construction point or straight edge."
+                "Selection must include one MBD datum feature and one target point, straight edge, or target-area face."
             )
             return
 
@@ -4068,28 +4147,133 @@ class CreateDatumTargetCommand:
             pass
 
         line_geometry = None
+        circle_geometry = None
+        rectangle_geometry = None
+        area_geometry = None
 
         if getattr(selected_shape, "ShapeType", "") == "Edge":
             line_geometry = straight_edge_geometry(selected_shape)
+            if line_geometry is None:
+                circle_geometry = circle_geometry_from_target(target_obj)
         elif selected_shape is not None:
             try:
                 if len(selected_shape.Edges) == 1:
                     line_geometry = straight_edge_geometry(
                         selected_shape.Edges[0]
                     )
+                    if line_geometry is None:
+                        circle_geometry = circle_geometry_from_target(target_obj)
             except Exception:
                 pass
 
-        if getattr(selected_shape, "ShapeType", "") == "Edge" and line_geometry is None:
+            if circle_geometry is None:
+                rectangle_geometry = rectangle_geometry_from_target(target_obj)
+
+            if rectangle_geometry is None:
+                area_geometry = area_geometry_from_target(target_obj)
+
+        if (
+            getattr(selected_shape, "ShapeType", "") == "Edge"
+            and line_geometry is None
+            and circle_geometry is None
+        ):
             doc.removeObject(target_obj.Name)
             QtGui.QMessageBox.warning(
                 None,
                 "Datum Target",
-                "A line datum target requires a straight construction edge."
+                "An edge datum target requires a straight or circular construction edge."
             )
             return
 
-        target_obj.TargetType = "Line" if line_geometry else "Point"
+        if line_geometry is not None:
+            target_obj.TargetType = "Line"
+        elif circle_geometry is not None:
+            target_obj.TargetType = "Circle"
+        elif rectangle_geometry is not None:
+            target_obj.TargetType = "Rectangle"
+        elif area_geometry is not None:
+            target_obj.TargetType = "Area"
+        else:
+            target_shape, ok = QtGui.QInputDialog.getItem(
+                None,
+                "Datum Target Area",
+                "Target shape at selected point:",
+                ["Point", "Circle", "Rectangle"],
+                0,
+                False
+            )
+
+            if not ok:
+                doc.removeObject(target_obj.Name)
+                return
+
+            target_obj.TargetType = str(target_shape)
+
+            if str(target_obj.TargetType) == "Circle":
+                diameter_text, ok = QtGui.QInputDialog.getText(
+                    None,
+                    "Circular Datum Target",
+                    "Enter target circle diameter with units:",
+                    text="0.25 in"
+                )
+
+                if not ok:
+                    doc.removeObject(target_obj.Name)
+                    return
+
+                try:
+                    target_obj.TargetDiameter = parse_length_quantity_text(
+                        diameter_text
+                    )
+                    target_obj.TargetLength = target_obj.TargetDiameter
+                except Exception:
+                    doc.removeObject(target_obj.Name)
+                    QtGui.QMessageBox.warning(
+                        None,
+                        "Circular Datum Target",
+                        "Enter a target diameter with units, such as 0.25 in or 6 mm."
+                    )
+                    return
+
+            if str(target_obj.TargetType) == "Rectangle":
+                length_text, ok = QtGui.QInputDialog.getText(
+                    None,
+                    "Rectangular Datum Target",
+                    "Enter target rectangle length with units:",
+                    text="0.25 in"
+                )
+
+                if not ok:
+                    doc.removeObject(target_obj.Name)
+                    return
+
+                width_text, ok = QtGui.QInputDialog.getText(
+                    None,
+                    "Rectangular Datum Target",
+                    "Enter target rectangle width with units:",
+                    text="0.25 in"
+                )
+
+                if not ok:
+                    doc.removeObject(target_obj.Name)
+                    return
+
+                try:
+                    target_obj.TargetLength = parse_length_quantity_text(
+                        length_text
+                    )
+                    target_obj.TargetWidth = parse_length_quantity_text(
+                        width_text
+                    )
+                except Exception:
+                    doc.removeObject(target_obj.Name)
+                    QtGui.QMessageBox.warning(
+                        None,
+                        "Rectangular Datum Target",
+                        "Enter target dimensions with units, such as 0.25 in or 6 mm."
+                    )
+                    return
+
         target_obj.ReferencedObject = parent_datum.ReferencedObject
         target_obj.ReferencedSubelement = parent_datum.ReferencedSubelement
 
@@ -4100,11 +4284,11 @@ class CreateDatumTargetCommand:
             QtGui.QMessageBox.warning(
                 None,
                 "Datum Target",
-                "The selected construction reference does not resolve to a supported point or straight line."
+                "The selected construction reference does not resolve to a supported datum target."
             )
             return
 
-        if str(target_obj.TargetType) == "Line":
+        if str(target_obj.TargetType) in ("Line", "Circle", "Rectangle", "Area"):
             distance = target_surface_distance(target_obj)
 
             if (
@@ -4115,8 +4299,9 @@ class CreateDatumTargetCommand:
                 QtGui.QMessageBox.warning(
                     None,
                     "Datum Target",
-                    "A line datum target must lie on the parent datum face. "
-                    "The selected line is {:.6f} mm from {}.{}.".format(
+                    "The selected {} datum target must lie on the parent datum face. "
+                    "The selected target is {:.6f} mm from {}.{}.".format(
+                        str(target_obj.TargetType).lower(),
                         distance if distance is not None else 0.0,
                         parent_datum.ReferencedObject.Name,
                         parent_datum.ReferencedSubelement
@@ -4164,7 +4349,7 @@ class CreateDimensionCommand:
             QtGui.QMessageBox.warning(
                 None,
                 "Dimension",
-                "Select one cylindrical face for diameter/radius, or two compatible references for a linear dimension."
+                "Select one cylindrical face for diameter/radius, or two compatible references for a linear or angular dimension."
             )
             return
 
@@ -4211,10 +4396,21 @@ class CreateDimensionCommand:
 
             if not ok:
                 return
+        else:
+            dimension_kind, ok = QtGui.QInputDialog.getItem(
+                None,
+                "Dimension",
+                "Dimension kind:",
+                ["Linear", "Angular"],
+                0,
+                False
+            )
+
+            if not ok:
+                return
 
         measurement_type = "Distance"
 
-        measurement_started = time.perf_counter()
         measurement = measurement_from_references(
             dimension_kind,
             measurement_type,
@@ -4223,7 +4419,6 @@ class CreateDimensionCommand:
             ref_obj_2,
             sub2
         )
-        measurement_elapsed = time.perf_counter() - measurement_started
         measured = measurement.get("value")
 
         if measured is None:
@@ -4237,10 +4432,15 @@ class CreateDimensionCommand:
             )
             return
 
-        measured_text = FreeCAD.Units.Quantity(
-            measured,
-            FreeCAD.Units.Length
-        ).UserString
+        if dimension_kind == "Angular":
+            measured_text = "{}°".format(
+                "{:.3f}".format(measured).rstrip("0").rstrip(".")
+            )
+        else:
+            measured_text = FreeCAD.Units.Quantity(
+                measured,
+                FreeCAD.Units.Length
+            ).UserString
         nominal = measured
 
         upper_tolerance = 0.0
@@ -4249,35 +4449,48 @@ class CreateDimensionCommand:
         lower_limit = nominal
 
         if purpose == "EqualBilateral":
+            default_tolerance_text = (
+                "0°"
+                if dimension_kind == "Angular"
+                else FreeCAD.Units.Quantity(0.0, FreeCAD.Units.Length).UserString
+            )
             tolerance_text, ok = QtGui.QInputDialog.getText(
                 None,
                 "Dimension",
                 "Bilateral tolerance:",
-                text=FreeCAD.Units.Quantity(0.0, FreeCAD.Units.Length).UserString
+                text=default_tolerance_text
             )
 
             if not ok:
                 return
 
             try:
-                upper_tolerance = abs(
-                    FreeCAD.Units.Quantity(str(tolerance_text)).Value
-                )
+                if dimension_kind == "Angular":
+                    upper_tolerance = abs(parse_angle_degrees(tolerance_text))
+                else:
+                    upper_tolerance = abs(
+                        FreeCAD.Units.Quantity(str(tolerance_text)).Value
+                    )
                 lower_tolerance = upper_tolerance
             except Exception:
                 QtGui.QMessageBox.warning(
                     None,
                     "Dimension",
-                    "Enter a tolerance value such as 0.005 in or 0.1 mm."
+                    "Enter a tolerance value such as 0.005 in, 0.1 mm, or 0.5 deg."
                 )
                 return
 
         if purpose == "UnequalBilateral":
+            default_tolerance_text = (
+                "0°"
+                if dimension_kind == "Angular"
+                else FreeCAD.Units.Quantity(0.0, FreeCAD.Units.Length).UserString
+            )
             upper_text, ok = QtGui.QInputDialog.getText(
                 None,
                 "Dimension",
                 "Upper tolerance:",
-                text=FreeCAD.Units.Quantity(0.0, FreeCAD.Units.Length).UserString
+                text=default_tolerance_text
             )
 
             if not ok:
@@ -4287,24 +4500,28 @@ class CreateDimensionCommand:
                 None,
                 "Dimension",
                 "Lower tolerance:",
-                text=FreeCAD.Units.Quantity(0.0, FreeCAD.Units.Length).UserString
+                text=default_tolerance_text
             )
 
             if not ok:
                 return
 
             try:
-                upper_tolerance = abs(
-                    FreeCAD.Units.Quantity(str(upper_text)).Value
-                )
-                lower_tolerance = abs(
-                    FreeCAD.Units.Quantity(str(lower_text)).Value
-                )
+                if dimension_kind == "Angular":
+                    upper_tolerance = abs(parse_angle_degrees(upper_text))
+                    lower_tolerance = abs(parse_angle_degrees(lower_text))
+                else:
+                    upper_tolerance = abs(
+                        FreeCAD.Units.Quantity(str(upper_text)).Value
+                    )
+                    lower_tolerance = abs(
+                        FreeCAD.Units.Quantity(str(lower_text)).Value
+                    )
             except Exception:
                 QtGui.QMessageBox.warning(
                     None,
                     "Dimension",
-                    "Enter tolerance values such as 0.005 in or 0.1 mm."
+                    "Enter tolerance values such as 0.005 in, 0.1 mm, or 0.5 deg."
                 )
                 return
 
@@ -4330,17 +4547,20 @@ class CreateDimensionCommand:
                 return
 
             try:
-                lower_limit = FreeCAD.Units.Quantity(str(lower_text)).Value
-                upper_limit = FreeCAD.Units.Quantity(str(upper_text)).Value
+                if dimension_kind == "Angular":
+                    lower_limit = parse_angle_degrees(lower_text)
+                    upper_limit = parse_angle_degrees(upper_text)
+                else:
+                    lower_limit = FreeCAD.Units.Quantity(str(lower_text)).Value
+                    upper_limit = FreeCAD.Units.Quantity(str(upper_text)).Value
             except Exception:
                 QtGui.QMessageBox.warning(
                     None,
                     "Dimension",
-                    "Enter limit values such as 1.245 in or 31.6 mm."
+                    "Enter limit values such as 1.245 in, 31.6 mm, or 45 deg."
                 )
                 return
 
-        creation_started = time.perf_counter()
         dim_obj = create_dimension_object(
             doc,
             ref_obj_1,
@@ -4357,7 +4577,6 @@ class CreateDimensionCommand:
             lower_limit=lower_limit,
             resolved_measurement=measurement
         )
-        creation_elapsed = time.perf_counter() - creation_started
 
         if dim_obj is None:
             QtGui.QMessageBox.warning(
@@ -4368,13 +4587,10 @@ class CreateDimensionCommand:
             return
 
         FreeCAD.Console.PrintMessage(
-            "Created dimension {} between {} and {} "
-            "(geometry {:.3f}s, creation {:.3f}s)\n".format(
+            "Created dimension {} between {} and {}\n".format(
                 dim_obj.Name,
                 ref_obj_1.Name,
-                ref_obj_2.Name if ref_obj_2 else "<none>",
-                measurement_elapsed,
-                creation_elapsed
+                ref_obj_2.Name if ref_obj_2 else "<none>"
             )
         )
 
@@ -4711,6 +4927,92 @@ class CreateFeatureControlFrameCommand:
             )
             return
 
+        material_modifier = "None"
+        projected_tolerance_zone = False
+        projected_tolerance_height = 0.0
+        unequally_disposed_zone = False
+        unequally_disposed_offset = 0.0
+
+        if tolerance_type == "Position":
+            material_modifier, ok = QtGui.QInputDialog.getItem(
+                None,
+                "Material Condition Modifier",
+                "Select material condition modifier:",
+                ["None", "MMC", "LMC"],
+                0,
+                False
+            )
+
+            if not ok:
+                return
+
+            material_modifier = str(material_modifier)
+
+            reply = QtGui.QMessageBox.question(
+                None,
+                "Projected Tolerance Zone",
+                "Add a projected tolerance zone?",
+                QtGui.QMessageBox.Yes | QtGui.QMessageBox.No,
+                QtGui.QMessageBox.No
+            )
+            projected_tolerance_zone = reply == QtGui.QMessageBox.Yes
+
+            if projected_tolerance_zone:
+                projected_text, ok = QtGui.QInputDialog.getText(
+                    None,
+                    "Projected Tolerance Zone",
+                    "Enter projected tolerance zone height with units:",
+                    text="0.25 in"
+                )
+
+                if not ok:
+                    return
+
+                try:
+                    projected_tolerance_height = parse_length_quantity_text(
+                        projected_text
+                    )
+                except Exception:
+                    QtGui.QMessageBox.warning(
+                        None,
+                        "Projected Tolerance Zone",
+                        "Enter a projected height with units, such as 0.25 in or 6 mm."
+                    )
+                    return
+
+        if tolerance_type in ("Profile", "LineProfile"):
+            reply = QtGui.QMessageBox.question(
+                None,
+                "Unequally Disposed Zone",
+                "Use an unequally disposed profile tolerance zone?",
+                QtGui.QMessageBox.Yes | QtGui.QMessageBox.No,
+                QtGui.QMessageBox.No
+            )
+            unequally_disposed_zone = reply == QtGui.QMessageBox.Yes
+
+            if unequally_disposed_zone:
+                offset_text, ok = QtGui.QInputDialog.getText(
+                    None,
+                    "Unequally Disposed Zone",
+                    "Enter unequal disposition offset with units:",
+                    text="0.001 in"
+                )
+
+                if not ok:
+                    return
+
+                try:
+                    unequally_disposed_offset = parse_length_quantity_text(
+                        offset_text
+                    )
+                except Exception:
+                    QtGui.QMessageBox.warning(
+                        None,
+                        "Unequally Disposed Zone",
+                        "Enter an offset with units, such as 0.001 in or 0.02 mm."
+                    )
+                    return
+
         datum_system = None
         datum_reference = None
 
@@ -4874,6 +5176,11 @@ class CreateFeatureControlFrameCommand:
         fcf_obj.ToleranceValue = tolerance
         fcf_obj.DiameterZone = tolerance_type == "Position"
         fcf_obj.ProfileAllOver = profile_all_over
+        fcf_obj.MaterialConditionModifier = material_modifier
+        fcf_obj.ProjectedToleranceZone = projected_tolerance_zone
+        fcf_obj.ProjectedToleranceHeight = projected_tolerance_height
+        fcf_obj.UnequallyDisposedZone = unequally_disposed_zone
+        fcf_obj.UnequallyDisposedOffset = unequally_disposed_offset
         fcf_obj.DatumSystem = datum_system
         fcf_obj.DatumReference = datum_reference
 
@@ -4964,6 +5271,77 @@ class ExportAP242Command:
                 str(e)
             )
 
+
+class InspectAP242PMICommand:
+
+    def GetResources(self):
+        return {
+            "MenuText": "Inspect AP242 PMI",
+            "ToolTip": "Scan an AP242 STEP file for PMI entities and unsupported import coverage",
+            "Pixmap": command_icon("inspect_ap242_pmi.svg")
+        }
+
+    def IsActive(self):
+        return True
+
+    def Activated(self):
+
+        filename, _ = QtGui.QFileDialog.getOpenFileName(
+            None,
+            "Inspect AP242 PMI",
+            "",
+            "STEP Files (*.step *.stp)"
+        )
+
+        if not filename:
+            return
+
+        try:
+            scan = MBDImporter.scan_step_pmi_entities(filename)
+            report = MBDImporter.format_step_pmi_scan_report(scan)
+            FreeCAD.Console.PrintMessage(report + "\n")
+
+            try:
+                QtGui.QApplication.clipboard().setText(report)
+                FreeCAD.Console.PrintMessage(
+                    "Copied AP242 PMI coverage report to clipboard.\n"
+                )
+            except Exception:
+                pass
+
+            if scan["unsupported"]:
+                QtGui.QMessageBox.warning(
+                    None,
+                    "AP242 PMI Coverage",
+                    "Detected {} AP242 PMI entity types that are deferred, unsupported, or intentionally not implemented. "
+                    "The detailed report was copied to the clipboard.".format(
+                        len(scan["unsupported"])
+                    )
+                )
+            elif scan["partial"]:
+                QtGui.QMessageBox.warning(
+                    None,
+                    "AP242 PMI Coverage",
+                    "Detected {} AP242 PMI entity types that are recognized but only partially covered by the add-on. "
+                    "The detailed report was copied to the clipboard.".format(
+                        len(scan["partial"])
+                    )
+                )
+            else:
+                QtGui.QMessageBox.information(
+                    None,
+                    "AP242 PMI Coverage",
+                    "All detected PMI entities are in the currently supported set. "
+                    "The detailed report was copied to the clipboard."
+                )
+
+        except Exception as e:
+            QtGui.QMessageBox.critical(
+                None,
+                "AP242 PMI Inspection Failed",
+                str(e)
+            )
+
 if hasattr(FreeCADGui, "addCommand"):
     FreeCADGui.addCommand("MBD_CreateDatumFeature", CreateDatumFeatureCommand())
     FreeCADGui.addCommand("MBD_ValidatePMI", ValidatePMICommand())
@@ -4994,4 +5372,8 @@ if hasattr(FreeCADGui, "addCommand"):
     FreeCADGui.addCommand(
         "MBD_ExportAP242",
         ExportAP242Command()
+    )
+    FreeCADGui.addCommand(
+        "MBD_InspectAP242PMI",
+        InspectAP242PMICommand()
     )

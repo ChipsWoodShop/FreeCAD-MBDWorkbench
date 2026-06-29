@@ -1,6 +1,7 @@
 # MBDDimension.py
 
 import json
+import math
 
 import FreeCAD
 import Part
@@ -44,6 +45,10 @@ LINEAR_DIMENSION_KINDS = [
     "Linear",
     "Diameter",
     "Radius",
+]
+
+SUPPORTED_DIMENSION_KINDS = LINEAR_DIMENSION_KINDS + [
+    "Angular",
 ]
 
 
@@ -273,7 +278,7 @@ class ViewProviderMBDDimension(ViewProviderSingleItemDimension):
 
 
 def measured_value_from_references(obj):
-    if str(obj.DimensionKind) not in LINEAR_DIMENSION_KINDS:
+    if str(obj.DimensionKind) not in SUPPORTED_DIMENSION_KINDS:
         return None
 
     result = measurement_from_references(
@@ -322,6 +327,26 @@ def good_measurement(value, point1, point2, pattern):
         "pattern": pattern,
         "message": "",
     }
+
+
+def angle_between_vectors_degrees(v1, v2):
+    if v1 is None or v2 is None:
+        return None
+
+    if v1.Length == 0 or v2.Length == 0:
+        return None
+
+    a = FreeCAD.Vector(v1)
+    b = FreeCAD.Vector(v2)
+    a.normalize()
+    b.normalize()
+    dot = max(min(abs(a.dot(b)), 1.0), -1.0)
+    angle = math.degrees(math.acos(dot))
+
+    if angle > 90.0:
+        angle = 180.0 - angle
+
+    return angle
 
 
 def shape_element(obj, subelement=""):
@@ -1071,6 +1096,133 @@ def axis_to_axis_measurement(axis1, axis2):
     return good_measurement(distance, closest1, closest2, pattern)
 
 
+def angular_measurement_from_references(
+    ref_obj_1,
+    ref_sub_1,
+    ref_obj_2,
+    ref_sub_2
+):
+    plane1 = planar_face_reference(ref_obj_1, ref_sub_1)
+    plane2 = planar_face_reference(ref_obj_2, ref_sub_2)
+    axis1 = line_reference(ref_obj_1, ref_sub_1)
+    axis2 = line_reference(ref_obj_2, ref_sub_2)
+
+    if plane1 is not None and plane2 is not None:
+        angle = angle_between_vectors_degrees(
+            plane1["normal"],
+            plane2["normal"]
+        )
+
+        if angle is None:
+            return empty_measurement("Could not resolve angle between planes.")
+
+        result = good_measurement(
+            angle,
+            plane1["point"],
+            plane2["point"],
+            "PlaneToPlaneAngle"
+        )
+        n1 = FreeCAD.Vector(plane1["normal"])
+        n2 = FreeCAD.Vector(plane2["normal"])
+        n1.normalize()
+        n2.normalize()
+        axis = n1.cross(n2)
+
+        if axis.Length > 1e-9:
+            axis.normalize()
+            midpoint = plane1["point"] + (plane2["point"] - plane1["point"]) * 0.5
+            rhs1 = n1.dot(plane1["point"]) - n1.dot(midpoint)
+            rhs2 = n2.dot(plane2["point"]) - n2.dot(midpoint)
+            n1_dot_n2 = n1.dot(n2)
+            determinant = 1.0 - (n1_dot_n2 * n1_dot_n2)
+
+            if abs(determinant) > 1e-12:
+                a = (rhs1 - n1_dot_n2 * rhs2) / determinant
+                b = (rhs2 - n1_dot_n2 * rhs1) / determinant
+                vertex = midpoint + n1 * a + n2 * b
+            else:
+                vertex = midpoint
+
+            ray1 = axis.cross(n1)
+            ray2 = axis.cross(n2)
+
+            if ray1.Length > 1e-9 and ray2.Length > 1e-9:
+                ray1.normalize()
+                ray2.normalize()
+
+                if ray1.dot(ray2) < 0.0:
+                    ray2 = ray2.negative()
+
+                extent = max(
+                    (plane1["point"] - vertex).Length,
+                    (plane2["point"] - vertex).Length,
+                    1.0
+                )
+                result["angle_vertex"] = vertex
+                result["angle_ray1"] = ray1
+                result["angle_ray2"] = ray2
+                result["angle_normal"] = axis
+                result["point1"] = vertex + ray1 * extent
+                result["point2"] = vertex + ray2 * extent
+                result["text_normal"] = axis
+
+        return result
+
+    if axis1 is not None and axis2 is not None:
+        angle = angle_between_vectors_degrees(
+            axis1["direction"],
+            axis2["direction"]
+        )
+
+        if angle is None:
+            return empty_measurement("Could not resolve angle between axes.")
+
+        return good_measurement(
+            angle,
+            axis1["point"],
+            axis2["point"],
+            "AxisToAxisAngle"
+        )
+
+    if plane1 is not None and axis2 is not None:
+        normal_angle = angle_between_vectors_degrees(
+            plane1["normal"],
+            axis2["direction"]
+        )
+
+        if normal_angle is None:
+            return empty_measurement("Could not resolve angle between plane and axis.")
+
+        angle = abs(90.0 - normal_angle)
+        return good_measurement(
+            angle,
+            plane1["point"],
+            axis2["point"],
+            "PlaneToAxisAngle"
+        )
+
+    if axis1 is not None and plane2 is not None:
+        normal_angle = angle_between_vectors_degrees(
+            axis1["direction"],
+            plane2["normal"]
+        )
+
+        if normal_angle is None:
+            return empty_measurement("Could not resolve angle between axis and plane.")
+
+        angle = abs(90.0 - normal_angle)
+        return good_measurement(
+            angle,
+            axis1["point"],
+            plane2["point"],
+            "AxisToPlaneAngle"
+        )
+
+    return empty_measurement(
+        "Angular dimensions require two planar faces, two straight/axis references, or one planar face and one straight/axis reference."
+    )
+
+
 def measurement_from_references(
     dimension_kind,
     measurement_type,
@@ -1083,6 +1235,14 @@ def measurement_from_references(
 
     cylinder1 = cylindrical_face_reference(ref_obj_1, ref_sub_1)
     cylinder2 = cylindrical_face_reference(ref_obj_2, ref_sub_2)
+
+    if dimension_kind == "Angular":
+        return angular_measurement_from_references(
+            ref_obj_1,
+            ref_sub_1,
+            ref_obj_2,
+            ref_sub_2
+        )
 
     if dimension_kind in ("Diameter", "Radius"):
         if cylinder1 is None:
@@ -1233,57 +1393,42 @@ def update_dimension_signature(obj, measurement=None):
 def dimension_display_label(obj):
     purpose = str(obj.DimensionPurpose)
     prefix = ""
+    dimension_kind = str(getattr(obj, "DimensionKind", ""))
 
-    if str(getattr(obj, "DimensionKind", "")) == "Radius":
+    if dimension_kind == "Radius":
         prefix = "R "
+
+    def value_text(value):
+        return FreeCAD.Units.Quantity(
+            value,
+            FreeCAD.Units.Length
+        ).UserString
+
+    if dimension_kind == "Angular":
+        def value_text(value):
+            rounded = "{:.3f}".format(float(value)).rstrip("0").rstrip(".")
+            return "{}°".format(rounded)
 
     if purpose == "Reference":
         return "({}{})".format(
             prefix,
-            FreeCAD.Units.Quantity(
-                obj.NominalValue,
-                FreeCAD.Units.Length
-            ).UserString
+            value_text(obj.NominalValue)
         )
 
     if purpose == "UnequalBilateral":
-        nominal = FreeCAD.Units.Quantity(
-            obj.NominalValue,
-            FreeCAD.Units.Length
-        ).UserString
-        upper = FreeCAD.Units.Quantity(
-            obj.UpperTolerance,
-            FreeCAD.Units.Length
-        ).UserString
-        lower = FreeCAD.Units.Quantity(
-            abs(obj.LowerTolerance),
-            FreeCAD.Units.Length
-        ).UserString
+        nominal = value_text(obj.NominalValue)
+        upper = value_text(obj.UpperTolerance)
+        lower = value_text(abs(obj.LowerTolerance))
         return "{}{} +{} -{}".format(prefix, nominal, upper, lower)
 
     if purpose == "EqualBilateral":
-        nominal = FreeCAD.Units.Quantity(
-            obj.NominalValue,
-            FreeCAD.Units.Length
-        ).UserString
-        tolerance = FreeCAD.Units.Quantity(
-            obj.UpperTolerance,
-            FreeCAD.Units.Length
-        ).UserString
+        nominal = value_text(obj.NominalValue)
+        tolerance = value_text(obj.UpperTolerance)
         return "{}{} +/- {}".format(prefix, nominal, tolerance)
 
     if purpose == "Limits":
-        lower = FreeCAD.Units.Quantity(
-            obj.LowerLimit,
-            FreeCAD.Units.Length
-        ).UserString
-        upper = FreeCAD.Units.Quantity(
-            obj.UpperLimit,
-            FreeCAD.Units.Length
-        ).UserString
+        lower = value_text(obj.LowerLimit)
+        upper = value_text(obj.UpperLimit)
         return "{}{} / {}{}".format(prefix, lower, prefix, upper)
 
-    return prefix + FreeCAD.Units.Quantity(
-        obj.NominalValue,
-        FreeCAD.Units.Length
-    ).UserString
+    return "{}{}".format(prefix, value_text(obj.NominalValue))

@@ -189,6 +189,44 @@ def validate_datum_target(obj):
             obj.TargetDirection = line["direction"]
             obj.TargetLength = line["length"]
 
+    if target_type == "Circle":
+        circle = MBDDatumTarget.circle_geometry_from_target(obj)
+
+        if circle is None:
+            errors.append(
+                "{} circular target requires a point reference and a positive target diameter.".format(
+                    obj.Name
+                )
+            )
+        else:
+            obj.TargetDirection = circle["x_axis"]
+            obj.TargetDiameter = circle["diameter"]
+            obj.TargetLength = circle["diameter"]
+
+    if target_type == "Rectangle":
+        rectangle = MBDDatumTarget.rectangle_geometry_from_target(obj)
+
+        if rectangle is None:
+            errors.append(
+                "{} rectangular target requires a point reference with positive target length and width.".format(
+                    obj.Name
+                )
+            )
+        else:
+            obj.TargetDirection = rectangle["x_axis"]
+            obj.TargetLength = rectangle["length"]
+            obj.TargetWidth = rectangle["width"]
+
+    if target_type == "Area":
+        area = MBDDatumTarget.area_geometry_from_target(obj)
+
+        if area is None:
+            errors.append(
+                "{} area target requires one construction face.".format(
+                    obj.Name
+                )
+            )
+
     distance = MBDDatumTarget.target_surface_distance(obj)
 
     if distance is None:
@@ -357,7 +395,7 @@ def validate_dimension(obj, fcf_objects=None):
     if obj.ReferenceObject1 is None:
         errors.append("{} has no first reference.".format(obj.Name))
 
-    if obj.ReferenceObject2 is None and dimension_kind == "Linear":
+    if obj.ReferenceObject2 is None and dimension_kind in ("Linear", "Angular"):
         errors.append("{} has no second reference.".format(obj.Name))
 
     if dimension_kind in ("Diameter", "Radius") and (
@@ -371,7 +409,7 @@ def validate_dimension(obj, fcf_objects=None):
             )
         )
 
-    if dimension_kind not in ("Linear", "Diameter", "Radius"):
+    if dimension_kind not in ("Linear", "Angular", "Diameter", "Radius"):
         errors.append(
             "{} uses unsupported dimension kind {}.".format(
                 obj.Name,
@@ -652,10 +690,12 @@ def validate_datum_system_target_sufficiency(doc, obj):
             if not targets:
                 continue
 
+            # Count constraints by resolved support geometry, not by nominal
+            # target type. Lines contribute two endpoints; point, circular,
+            # rectangular, and area targets contribute their center point.
             constraint_count = sum(
-                2 if str(target.TargetType) == "Line" else 1
+                len(_distinct_target_points(_target_support_points(target)))
                 for target in targets
-                if str(target.TargetType) in {"Point", "Line"}
             )
 
             if constraint_count < required_count:
@@ -1352,6 +1392,69 @@ def validate_fcf(obj):
         )
 
     tolerance_type = str(getattr(obj, "ToleranceType", ""))
+
+    material_modifier = str(
+        getattr(obj, "MaterialConditionModifier", "None")
+    )
+    if material_modifier not in ("None", "MMC", "LMC"):
+        errors.append(
+            "{} has unsupported material condition modifier {}.".format(
+                obj.Name,
+                material_modifier
+            )
+        )
+
+    if material_modifier in ("MMC", "LMC"):
+        if tolerance_type != "Position":
+            errors.append(
+                "{} material condition modifiers are currently supported only on position tolerances.".format(
+                    obj.Name
+                )
+            )
+        if not getattr(obj, "DiameterZone", False):
+            errors.append(
+                "{} material condition modifiers require a diametrical tolerance zone.".format(
+                    obj.Name
+                )
+            )
+
+    if getattr(obj, "ProjectedToleranceZone", False):
+        try:
+            projected_height = float(getattr(obj, "ProjectedToleranceHeight", 0.0))
+        except Exception:
+            projected_height = 0.0
+
+        if tolerance_type != "Position":
+            errors.append(
+                "{} projected tolerance zones are currently supported only on position tolerances.".format(
+                    obj.Name
+                )
+            )
+        if projected_height <= 0.0:
+            errors.append(
+                "{} projected tolerance zone requires a positive projected height.".format(
+                    obj.Name
+                )
+            )
+
+    if getattr(obj, "UnequallyDisposedZone", False):
+        try:
+            unequal_offset = float(getattr(obj, "UnequallyDisposedOffset", 0.0))
+        except Exception:
+            unequal_offset = 0.0
+
+        if tolerance_type not in ("Profile", "LineProfile"):
+            errors.append(
+                "{} unequally disposed zones are valid only for profile tolerances.".format(
+                    obj.Name
+                )
+            )
+        if unequal_offset <= 0.0:
+            errors.append(
+                "{} unequally disposed profile zone requires a positive offset.".format(
+                    obj.Name
+                )
+            )
 
     if tolerance_type == "Position" and obj.DatumSystem is None:
 

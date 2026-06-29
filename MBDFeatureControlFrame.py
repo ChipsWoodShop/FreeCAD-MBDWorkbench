@@ -6,6 +6,18 @@ from MBDPMI import ensure_global_link_property, ensure_pmi_identity
 from MBDViewProvider import ViewProviderSingleItemFCF
 
 
+def add_property_if_missing(obj, prop_type, name, group, description):
+    if hasattr(obj, name):
+        return
+
+    obj.addProperty(
+        prop_type,
+        name,
+        group,
+        description
+    )
+
+
 class MBDFeatureControlFrame:
 
     def __init__(self, obj):
@@ -60,6 +72,49 @@ class MBDFeatureControlFrame:
         )
 
         obj.ProfileAllOver = False
+
+        add_property_if_missing(
+            obj,
+            "App::PropertyEnumeration",
+            "MaterialConditionModifier",
+            "MBD_FCF",
+            "Tolerance material condition modifier"
+        )
+        obj.MaterialConditionModifier = ["None", "MMC", "LMC"]
+
+        add_property_if_missing(
+            obj,
+            "App::PropertyBool",
+            "ProjectedToleranceZone",
+            "MBD_FCF",
+            "Tolerance zone is projected"
+        )
+        obj.ProjectedToleranceZone = False
+
+        add_property_if_missing(
+            obj,
+            "App::PropertyLength",
+            "ProjectedToleranceHeight",
+            "MBD_FCF",
+            "Projected tolerance zone height"
+        )
+
+        add_property_if_missing(
+            obj,
+            "App::PropertyBool",
+            "UnequallyDisposedZone",
+            "MBD_FCF",
+            "Profile tolerance zone is unequally disposed"
+        )
+        obj.UnequallyDisposedZone = False
+
+        add_property_if_missing(
+            obj,
+            "App::PropertyLength",
+            "UnequallyDisposedOffset",
+            "MBD_FCF",
+            "Unequally disposed profile offset"
+        )
 
         obj.addProperty(
             "App::PropertyLink",
