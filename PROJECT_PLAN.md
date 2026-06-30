@@ -43,9 +43,10 @@ The AP242 exporter currently writes:
   circularity/roundness, cylindricity, circular runout, and total runout
 - datum references for supported datum-referenced FCFs
 
-Semantic point datum targets are modeled in FreeCAD and now export as AP242
-placed datum target features. Semantic dimensions export for diameter, radius,
-plane-to-plane thickness, and initial linear feature-location cases.
+Semantic point, line, circular, and rectangular datum targets are modeled in
+FreeCAD and export as AP242 placed datum target features. Semantic dimensions
+export for diameter, radius, plane-to-plane thickness, linear feature-location,
+and face-backed angular cases.
 
 ## Important Implementation Notes
 
@@ -54,7 +55,7 @@ plane-to-plane thickness, and initial linear feature-location cases.
 - Keep the direct `TDataStd_Integer` and `TDataStd_Real` child-label workaround
   for geometric tolerances unless a replacement is verified against pythonocc
   and OCCT.
-- Current visible PMI is FreeCAD-side display helper geometry, not AP242
+- Current visible PMI is FreeCAD-side view-provider geometry, not AP242
   presentation PMI.
 - STEP validation should use STEP text/entity checks and headless FreeCAD
   tests, not GUI viewer appearance alone.
@@ -80,7 +81,7 @@ plane-to-plane thickness, and initial linear feature-location cases.
 | Visualization | Visible datum labels, datum targets, basic dimensions, dimensions, and FCFs | Done | Helper-object display is good enough for the current phase and can be refined in the final cosmetic phase as needed. |
 | Visualization | Drawn GD&T symbol geometry for FreeCAD display | Done | Unicode symbol text did not render reliably, so symbols are drawn. |
 | Visualization | FCF tolerance input with units | Done | Supports entries such as `0.005 in` and `0.1 mm`. |
-| Visualization | Position FCF display below related feature dimension when possible | Done | Needs continued GUI testing across feature types. |
+| Visualization | Position FCF display below related feature dimension when possible | Done | GUI testing passed for the current diameter/position workflow. |
 | Visualization | Exterior leader placement for surface FCFs | Done | Uses surface/solid probing to avoid drawing through the solid. |
 | Tolerances | Parallelism FCF definition with a single datum-reference surface | Done | Display, validation, and semantic AP242 export are in place. |
 | Testing | Headless smoke/regression harness using FreeCAD command line | Done | Used for exporter, validation, and display regressions. |
@@ -123,7 +124,7 @@ remaining model/export features below are implemented or explicitly deferred.
 | Add semantic export for remaining direct geometric tolerance controls | Done | Line profile, angularity, straightness, circularity/roundness, cylindricity, circular runout, and total runout are mapped through the same XCAF geometric tolerance path and covered by STEP text checks. |
 | Add semantic dimension export | Done | Core semantic dimension export is implemented for diameter, radius, plane-to-plane thickness, and linear location dimensions with no null references. Directed/path dimension variants remain future items. |
 | Add semantic radius dimension export | Done | Radius dimensions export through a post-write AP242 `DIMENSIONAL_SIZE('radius')` entity pass with `SHAPE_DIMENSION_REPRESENTATION`, `DIMENSIONAL_CHARACTERISTIC_REPRESENTATION`, and plus/minus tolerance support, avoiding the native OCCT null-reference path. |
-| Design angular semantic dimension workflow | In progress | Initial angular dimensions are available through `Create Dimension` when two references are selected. Headless export writes face-backed AP242 `ANGULAR_LOCATION`; richer GUI testing, angular size cases, and edge/axis export mapping remain. |
+| Design angular semantic dimension workflow | Done | Two-reference angular dimensions are available through `Create Dimension`; GUI validation/display/export passed for a face-backed angular location case. Richer angular-size and edge/axis mapping are tracked as future AP242 coverage refinements. |
 | Add semantic point datum target export | Done | Point datum targets export through OCCT/XCAF as `PLACED_DATUM_TARGET_FEATURE` with `FEATURE_FOR_DATUM_TARGET_RELATIONSHIP`; headless and GUI STEP checks passed. |
 | Add common-datum and flexible datum-system definition/export | Done | Datum systems now contain one to three ordered compartments; each compartment accepts one datum or multiple simultaneous common datums such as `A-B`. XCAF/AP242 export writes `COMMON_DATUM_LIST` and the corresponding datum reference elements. |
 | Add semantic line datum target definition/export | Done | Straight construction edges define line targets with stored center, direction, and length; full-segment validation, single-item display, mixed point/line sufficiency, creation-time rejection for off-surface lines, and native OCCT/AP242 export have passed GUI testing. |
@@ -135,7 +136,7 @@ remaining model/export features below are implemented or explicitly deferred.
 
 | Order | Workstream | Status | Notes |
 | --- | --- | --- | --- |
-| 1 | Angular semantic dimensions | In progress | Initial two-reference angular dimension creation, validation, display labeling in degrees, and AP242 post-write angular export are implemented for face-backed references. GUI testing and richer edge/axis cases remain. |
+| 1 | Angular semantic dimensions | Done | Two-reference angular dimension creation, validation, degree-symbol display, and AP242 post-write angular export passed GUI testing for face-backed references. Richer edge/axis cases remain future refinements. |
 | 2 | Circular, rectangular, and area datum targets | In progress | Circular and rectangular target areas are implemented and passed GUI export testing. Rectangular target orientation is currently inferred from the datum plane frame; explicit user-controlled in-plane orientation remains future work. Arbitrary area targets are FreeCAD-model/validation-only until a reliable AP242 export path is found. |
 | 3 | FCF modifiers and richer tolerance zones | In progress | Material-condition modifier, projected tolerance zone, and unequally disposed profile fields now exist in the FreeCAD model, display in FCF cells, and validate conservatively. MMC/LMC export through AP242 `GEOMETRIC_TOLERANCE_WITH_MODIFIERS` is covered; projected-zone height, unequal disposition export, and richer zone definition remain future work. |
 | 4 | Path-defined dimensions | Future | Add `DIMENSIONAL_SIZE_WITH_PATH` and `DIMENSIONAL_LOCATION_WITH_PATH` only after normal size/location dimensions and target areas are stable. |
@@ -186,13 +187,13 @@ Source for this matrix: local OCCT AP242/STEP support in `RWStepAP214_ReadWriteM
 
 | AP242 entity | Dimension concept | FreeCAD model status | AP242 export status | Notes |
 | --- | --- | --- | --- | --- |
-| `DIMENSIONAL_SIZE` | Feature size such as diameter, radius, width, thickness | Partial | Partial | Diameter and plane-to-plane thickness dimensions validate and export as AP242 `DIMENSIONAL_SIZE`; radius dimensions export through the post-write AP242 size-dimension path. Path-defined size remains a separate future entity family. |
+| `DIMENSIONAL_SIZE` | Feature size such as diameter, radius, width, thickness | Partial | Partial | Diameter, radius, and plane-to-plane thickness dimensions validate and export as AP242 `DIMENSIONAL_SIZE`. Path-defined size remains a separate future entity family. |
 | `DIMENSIONAL_SIZE_WITH_PATH` | Size with path | Not started | Not started | Needed for more complex path-defined size cases. |
 | `DIMENSIONAL_LOCATION` | Location between features | Partial | Partial | Axis/plane/point location dimensions exist. Direct OCCT export produced a null second shape reference, so the exporter now appends a narrow face-backed AP242 `DIMENSIONAL_LOCATION` entity set after STEP write. GUI exports `MBDTest01_AN.step`, `MBDTest01_AP.step`, and `MBDTest01_AR.step` created location dimensions with no null references. Plane-to-plane size is handled separately as thickness. |
 | `DIRECTED_DIMENSIONAL_LOCATION` | Directed linear location | Partial | Partial | Treat as an exporter-side AP242 representation choice, not a user-facing dimension mode. The workbench should continue letting users define the meaningful model dimension; the exporter may choose `DIRECTED_DIMENSIONAL_LOCATION` when the semantic dimension and AP242 mapping require it. |
 | `DIMENSIONAL_LOCATION_WITH_PATH` | Location with path | Not started | Not started | Needed for path-dependent location dimensions. |
 | `ANGULAR_SIZE` | Angular size | Partial | Partial | Angular dimension model exists and can infer nominal angles from planes/axes. AP242 export is initially available for face-backed references; GUI angular-size workflow and richer edge/axis export mapping remain. |
-| `ANGULAR_LOCATION` | Angular location | Partial | Partial | Angular dimensions are defined separately from FCFs and export through a post-write AP242 angular entity path for face-backed references. GUI testing and richer reference mapping remain. |
+| `ANGULAR_LOCATION` | Angular location | Partial | Partial | Angular dimensions are defined separately from FCFs and export through a post-write AP242 angular entity path for face-backed references. GUI testing passed for a planar-face case; richer edge/axis reference mapping remains. |
 | `SHAPE_DIMENSION_REPRESENTATION` | Dimension value representation | Done | Done | Exported for supported size and location dimensions and covered by STEP text regression. |
 | `DIMENSIONAL_CHARACTERISTIC_REPRESENTATION` | Link from dimension characteristic to representation | Done | Done | Exported for supported size and location dimensions and covered by STEP text regression. |
 | `PLUS_MINUS_TOLERANCE` | Equal/unequal bilateral tolerance | Done | Done | Equal and unequal bilateral dimensions validate semantically and export for supported size and location dimensions. |
@@ -212,8 +213,8 @@ Source for this matrix: local OCCT AP242/STEP support in `RWStepAP214_ReadWriteM
 | `TOLERANCE_ZONE` | Tolerance zone | Partial | Partial | Position diameter zone exports a tolerance zone; broader zone support pending. |
 | `TOLERANCE_ZONE_FORM` | Zone form | Partial | Partial | Cylindrical/circular form appears for diameter position tolerance. |
 | `TOLERANCE_ZONE_DEFINITION` | Zone definition | Not started | Not started | Needed for richer zone geometry. |
-| `RUNOUT_ZONE_DEFINITION` | Runout zone definition | Partial | Partial | Generated by OCCT for current position diameter-zone path; true runout controls not modeled. |
-| `RUNOUT_ZONE_ORIENTATION` | Runout zone orientation | Partial | Partial | Generated by OCCT in current position diameter-zone path. |
+| `RUNOUT_ZONE_DEFINITION` | Runout zone definition | Partial | Partial | Runout FCFs are modeled and exported, but explicit AP242 runout-zone geometry remains a future refinement. |
+| `RUNOUT_ZONE_ORIENTATION` | Runout zone orientation | Partial | Partial | Runout FCFs are modeled and exported, but explicit AP242 runout-zone orientation remains a future refinement. |
 
 ### Presentation PMI
 
@@ -221,14 +222,14 @@ Source for this matrix: local OCCT AP242/STEP support in `RWStepAP214_ReadWriteM
 | --- | --- | --- | --- | --- |
 | `DIMENSION_CURVE` / `DIMENSION_CURVE_TERMINATOR` | Visible dimension lines and arrows | View-provider display only | Not started | Current Coin3D dimension geometry is FreeCAD-native, not AP242 presentation PMI. |
 | `PRESENTATION_SIZE` | Presentation text/symbol sizing | View-provider display only | Not started | Text size is stored in FreeCAD display-layout metadata; AP242 presentation sizing is not exported. |
-| Draughting/presentation annotation entities | Visible PMI graphics | Helper display only | Future | Defer until semantic export and display-layout properties stabilize. |
+| Draughting/presentation annotation entities | Visible PMI graphics | View-provider display only | Future | Defer AP242 presentation export until semantic export and display-layout properties stabilize. |
 
 ## Annotation Architecture Roadmap
 
 | Phase | Milestone | Status | Notes |
 | --- | --- | --- | --- |
 | Short term | Continue using helper objects for rapid iteration | Done | All current semantic annotation types now have owning view-provider rendering; helper creation remains only as migration/legacy cleanup code. |
-| Short term | Organize helper objects so the model tree remains usable | Done | `MBD PMI` group and semantic-owner grouping remain available for annotation types that still use helpers. |
+| Short term | Organize helper objects so the model tree remains usable | Done | `MBD PMI` group organizes semantic owners; helper-object grouping remains only for legacy cleanup and fallback paths. |
 | Medium term | Define stable display-layout properties for each semantic PMI object | Done | Semantic PMI objects now store versioned origin, plane normal, reading direction, text height, layout mode, and a layout lock; save/reopen persistence is covered headlessly. |
 | Medium term | Avoid storing derived visual geometry when it can be regenerated | Done | Datum features, FCFs, datum targets, and dimensions regenerate visible geometry through their owning view providers. |
 | Long term | Replace helper display objects with custom FreeCAD view-provider rendering | Done | Current datum, target, FCF, and dimension annotations each have a single-tree-item implementation. |
@@ -394,4 +395,4 @@ tests are completed.
 | Tweak appearance of view-provider text and symbols for readability (size, line thickness, text view direction) | Future | Start after the full workstream from model definition in FreeCAD to complete export to AP242 has been thoroughly tested and verified|
 | Refine annotation placement interaction | Future | Current double-click/click placement is functional; later work can make movement feel more like Sketcher constraints or TechDraw annotations with conventional press-drag-release behavior. |
 | Create graphical symbols for each tool in the toolbar | Done | Ten 64x64 SVG command icons in `mbd_command_icons` are wired to the MBD toolbar and menu commands. |
-| Comment all the code cleanly to make it sustainable | Future | Start after code is done|
+| Comment all the code cleanly to make it sustainable | Ongoing | Initial maintainability pass removed obsolete timing diagnostics and documented the view-provider migration, post-write AP242 dimension paths, datum-target geometry, and validation rules. Broader cleanup should continue as features stabilize. |
