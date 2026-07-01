@@ -940,6 +940,51 @@ def controlled_labels_for_fcf(pmi_obj, face_label_map, subshape_label_map=None):
     return []
 
 
+def warn_unexported_fcf_semantics(pmi_obj):
+    # These properties are valid FreeCAD-side semantic PMI and are shown in the
+    # FCF view provider, but their AP242 entity mapping still needs a verified
+    # standards/OCCT path. Warn during export so no semantic intent is silently
+    # lost in the STEP file.
+    if getattr(pmi_obj, "UnequallyDisposedZone", False):
+        FreeCAD.Console.PrintWarning(
+            "AP242 export for {} does not yet include unequal profile disposition offset {}; "
+            "the base tolerance is exported without that unequally disposed profile semantic.\n".format(
+                getattr(pmi_obj, "Name", "<FCF>"),
+                getattr(pmi_obj, "UnequallyDisposedOffset", "")
+            )
+        )
+
+
+def projected_zone_export_data(pmi_obj, controlled_labels):
+    if not getattr(pmi_obj, "ProjectedToleranceZone", False):
+        return None
+
+    if str(getattr(pmi_obj, "ToleranceType", "")) != "Position":
+        return None
+
+    if not getattr(pmi_obj, "DiameterZone", False):
+        return None
+
+    subname = getattr(pmi_obj, "ControlledSubelement", "")
+
+    if not subname or len(controlled_labels) != 1:
+        return None
+
+    try:
+        height = float(getattr(pmi_obj, "ProjectedToleranceHeight", 0.0))
+    except Exception:
+        height = 0.0
+
+    if height <= 0.0:
+        return None
+
+    return {
+        "name": getattr(pmi_obj, "Name", ""),
+        "subname": subname,
+        "height": height,
+    }
+
+
 def set_geom_tolerance_shapes(dimtol_tool, controlled_labels, geomtol_label):
     if len(controlled_labels) == 1:
         dimtol_tool.SetGeomTolerance(
@@ -965,6 +1010,8 @@ def export_feature_control_frames(
     face_label_map,
     subshape_label_map=None
 ):
+    pending_projected_zones = []
+
     for pmi_obj in iter_feature_control_frames(doc):
         if geom_tolerance_type_value(pmi_obj.ToleranceType) is None:
             FreeCAD.Console.PrintWarning(
@@ -995,6 +1042,14 @@ def export_feature_control_frames(
                 fcf_export_attachment_text(pmi_obj)
             )
         )
+        warn_unexported_fcf_semantics(pmi_obj)
+        projected_zone = projected_zone_export_data(
+            pmi_obj,
+            controlled_labels
+        )
+
+        if projected_zone is not None:
+            pending_projected_zones.append(projected_zone)
 
         geomtol_label = dimtol_tool.AddGeomTolerance()
         configure_geometric_tolerance(geomtol_label, pmi_obj)
@@ -1011,6 +1066,8 @@ def export_feature_control_frames(
             face_label_map,
             geomtol_label
         )
+
+    return pending_projected_zones
 
 
 def export_dimensions(doc, dimtol_tool, face_label_map, export_obj):
@@ -1559,6 +1616,76 @@ def step_advanced_face_map(text):
     }
 
 
+def step_entities(text):
+    return [
+        (int(entity_id), body)
+        for entity_id, body in re.findall(
+            r"#(\d+)\s*=\s*(.*?);",
+            text,
+            re.DOTALL
+        )
+    ]
+
+
+def step_shape_aspects_for_face(text, face_id):
+    aspects = set()
+
+    for _entity_id, body in step_entities(text):
+        if "GEOMETRIC_ITEM_SPECIFIC_USAGE" not in body:
+            continue
+
+        match = re.search(
+            r"GEOMETRIC_ITEM_SPECIFIC_USAGE\('[^']*','[^']*',#(\d+),#\d+,#{}\)".format(
+                face_id
+            ),
+            body,
+            re.DOTALL
+        )
+
+        if match:
+            aspects.add(int(match.group(1)))
+
+    return aspects
+
+
+def step_position_tolerance_zones_for_face(text, face_id):
+    # OCCT writes the base position tolerance and its tolerance zone before our
+    # post-write projected-zone pass. Match them through the controlled
+    # GEOMETRIC_ITEM_SPECIFIC_USAGE shape aspect rather than relying on labels.
+    controlled_aspects = step_shape_aspects_for_face(text, face_id)
+
+    if not controlled_aspects:
+        return []
+
+    tolerance_ids = set()
+
+    for entity_id, body in step_entities(text):
+        if "POSITION_TOLERANCE" not in body:
+            continue
+
+        match = re.search(
+            r"GEOMETRIC_TOLERANCE\('[^']*','[^']*',#\d+,#(\d+)\)",
+            body,
+            re.DOTALL
+        )
+
+        if match and int(match.group(1)) in controlled_aspects:
+            tolerance_ids.add(entity_id)
+
+    zone_ids = []
+
+    for entity_id, body in step_entities(text):
+        if "TOLERANCE_ZONE" not in body:
+            continue
+
+        for tolerance_id in tolerance_ids:
+            if re.search(r"\(#{}\)".format(tolerance_id), body):
+                zone_ids.append(entity_id)
+                break
+
+    return zone_ids
+
+
 def step_float(value):
     text = "{:.12g}".format(float(value))
 
@@ -2104,6 +2231,112 @@ def append_step_angular_dimensions(filepath, angular_dimensions):
     )
 
 
+def append_step_projected_zone_definitions(filepath, projected_zones):
+    if not projected_zones:
+        return
+
+    with open(filepath, "r", encoding="utf-8", errors="replace") as handle:
+        text = handle.read()
+
+    product_shape_id = find_step_product_definition_shape(text)
+    shape_rep_id, context_id = find_step_shape_representation(text)
+    unit_id = find_step_length_unit(text, context_id)
+    face_map = step_advanced_face_map(text)
+    next_id = next_step_entity_id(text)
+    lines = []
+    exported_count = 0
+
+    if product_shape_id is None or shape_rep_id is None or context_id is None or unit_id is None:
+        FreeCAD.Console.PrintWarning(
+            "Skipping AP242 projected zone definitions because STEP context entities could not be identified.\n"
+        )
+        return
+
+    for projected_zone in projected_zones:
+        face_id = face_map.get(projected_zone["subname"])
+
+        if face_id is None:
+            FreeCAD.Console.PrintWarning(
+                "Skipping AP242 projected zone definition for {} because its face entity could not be mapped.\n".format(
+                    projected_zone["name"]
+                )
+            )
+            continue
+
+        tolerance_zone_ids = step_position_tolerance_zones_for_face(
+            text,
+            face_id
+        )
+
+        if not tolerance_zone_ids:
+            FreeCAD.Console.PrintWarning(
+                "Skipping AP242 projected zone definition for {} because its base tolerance zone could not be found.\n".format(
+                    projected_zone["name"]
+                )
+            )
+            continue
+
+        aspect_id = next_id
+        gisu_id = next_id + 1
+        height_id = next_id + 2
+        projected_zone_id = next_id + 3
+        next_id += 4
+
+        lines.extend([
+            "#{} = SHAPE_ASPECT('projected zone {}','',#{},.T.);".format(
+                aspect_id,
+                projected_zone["name"],
+                product_shape_id
+            ),
+            "#{} = GEOMETRIC_ITEM_SPECIFIC_USAGE('projected zone {}','',#{},#{},#{});".format(
+                gisu_id,
+                projected_zone["name"],
+                aspect_id,
+                shape_rep_id,
+                face_id
+            ),
+            "#{} = LENGTH_MEASURE_WITH_UNIT(LENGTH_MEASURE({}),#{});".format(
+                height_id,
+                step_float(projected_zone["height"]),
+                unit_id
+            ),
+            "#{} = PROJECTED_ZONE_DEFINITION(#{},(),#{},#{});".format(
+                projected_zone_id,
+                tolerance_zone_ids[-1],
+                aspect_id,
+                height_id
+            ),
+        ])
+        exported_count += 1
+
+    if not lines:
+        return
+
+    insertion = "\n".join(lines) + "\n"
+    insertion_index = text.rfind("ENDSEC;")
+
+    if insertion_index < 0:
+        FreeCAD.Console.PrintWarning(
+            "Skipping AP242 projected zone definitions because ENDSEC was not found.\n"
+        )
+        return
+
+    text = (
+        text[:insertion_index]
+        + insertion
+        + text[insertion_index:]
+    )
+
+    with open(filepath, "w", encoding="utf-8") as handle:
+        handle.write(text)
+
+    FreeCAD.Console.PrintMessage(
+        "Added {} AP242 projected zone definitions after STEP write.\n".format(
+            exported_count
+        )
+    )
+
+
 def dimension_tolerance_values_from_export_data(location_dim):
     if location_dim["purpose"] not in ("UnequalBilateral", "EqualBilateral"):
         return None
@@ -2184,6 +2417,7 @@ def export_ap242(filepath):
     pending_location_dimensions = []
     pending_size_dimensions = []
     pending_angular_dimensions = []
+    pending_projected_zones = []
 
     for obj in doc.Objects:
         if not should_export_shape_object(obj):
@@ -2225,12 +2459,13 @@ def export_ap242(filepath):
             face_label_map
         )
 
-        export_feature_control_frames(
+        projected_zones = export_feature_control_frames(
             doc,
             dimtol_tool,
             face_label_map,
             subshape_label_map
         )
+        pending_projected_zones.extend(projected_zones)
 
         location_dimensions, size_dimensions, angular_dimensions = export_dimensions(
             doc,
@@ -2266,9 +2501,18 @@ def export_ap242(filepath):
             filepath,
             pending_angular_dimensions
         )
-    elif pending_location_dimensions or pending_size_dimensions or pending_angular_dimensions:
+        append_step_projected_zone_definitions(
+            filepath,
+            pending_projected_zones
+        )
+    elif (
+        pending_location_dimensions
+        or pending_size_dimensions
+        or pending_angular_dimensions
+        or pending_projected_zones
+    ):
         FreeCAD.Console.PrintWarning(
-            "Skipping AP242 post-write dimensions because multiple export shapes were written.\n"
+            "Skipping AP242 post-write PMI entities because multiple export shapes were written.\n"
         )
 
     FreeCAD.Console.PrintMessage(

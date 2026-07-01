@@ -172,6 +172,8 @@ def export_smoke(mode, output_path, controlled_subelement):
             controlled_subelement
         )
         fcf.MaterialConditionModifier = "MMC"
+        fcf.ProjectedToleranceZone = True
+        fcf.ProjectedToleranceHeight = 6.35
     elif mode == "all-fcfs":
         add_export_fcf(
             doc,
@@ -258,6 +260,11 @@ def export_smoke(mode, output_path, controlled_subelement):
         if "MAXIMUM_MATERIAL_REQUIREMENT" not in step_text:
             raise AssertionError(
                 "MMC FCF export did not write MAXIMUM_MATERIAL_REQUIREMENT"
+            )
+
+        if "PROJECTED_ZONE_DEFINITION" not in step_text:
+            raise AssertionError(
+                "projected tolerance zone export did not write PROJECTED_ZONE_DEFINITION"
             )
 
     print("headless smoke export passed:", mode, output_path, size)
@@ -1253,6 +1260,7 @@ def single_item_fcf_layout_smoke():
         "Modifier M",
         "Modifier L",
         "Modifier P",
+        "Modifier U",
     ):
         if not symbol_segments(symbol_name):
             raise AssertionError(
@@ -2299,7 +2307,7 @@ def fcf_rule_validation_smoke():
                 "; ".join(unequal_errors)
             )
         )
-    if "UZ" not in cell_text(unequal_cells):
+    if "Modifier U" not in cell_text(unequal_cells):
         FreeCAD.closeDocument(doc.Name)
         raise AssertionError(
             "profile FCF cell did not include unequal disposition: {}".format(

@@ -2201,6 +2201,11 @@ def make_gdt_symbol_geometry(doc, symbol_name, point, size, rotation=None, objec
             add_line(0.62, 0.72, 0.72, 0.62)
             add_line(0.72, 0.62, 0.62, 0.52)
             add_line(0.62, 0.52, 0.34, 0.52)
+        elif symbol_name == "Modifier U":
+            add_circle(0.50, 0.50, 0.34)
+            add_line(0.30, 0.72, 0.30, 0.38)
+            add_arc(0.50, 0.38, 0.20, 0.16, 180, 360)
+            add_line(0.70, 0.38, 0.70, 0.72)
         else:
             add_circle(0.50, 0.50, 0.25)
 
@@ -2673,7 +2678,7 @@ def fcf_cells(fcf_obj):
             getattr(fcf_obj, "UnequallyDisposedOffset", 0.0),
             FreeCAD.Units.Length
         ).UserString
-        tolerance += " UZ {}".format(offset)
+        tolerance += " Ⓤ {}".format(offset)
 
     cells = [
         fcf_tolerance_symbol(fcf_obj.ToleranceType),

@@ -172,6 +172,11 @@ def symbol_segments(symbol_name):
         line(0.62, 0.72, 0.72, 0.62)
         line(0.72, 0.62, 0.62, 0.52)
         line(0.62, 0.52, 0.34, 0.52)
+    elif symbol_name == "Modifier U":
+        circle(0.50, 0.50, 0.34)
+        line(0.30, 0.72, 0.30, 0.38)
+        arc(0.50, 0.38, 0.20, 0.16, 180, 360)
+        line(0.70, 0.38, 0.70, 0.72)
 
     return segments
 
@@ -227,7 +232,7 @@ def fcf_cells(obj):
             getattr(obj, "UnequallyDisposedOffset", 0.0),
             FreeCAD.Units.Length
         ).UserString
-        tolerance_parts.append(("text", "UZ"))
+        tolerance_parts.append(("symbol", "Modifier U"))
         tolerance_parts.append(("text", offset))
 
     cells = [
