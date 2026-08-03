@@ -6,7 +6,7 @@ import FreeCADGui
 from PySide import QtGui
 from PySide import QtCore
 
-import MBDValidation
+from . import MBDValidation
 
 
 STATUS_COLORS = {

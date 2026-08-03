@@ -5,8 +5,8 @@ import json
 import FreeCAD
 import Part
 
-from MBDPMI import ensure_global_link_property, ensure_pmi_identity
-from MBDViewProvider import ViewProviderSingleItemDatumTarget
+from .MBDPMI import ensure_global_link_property, ensure_pmi_identity
+from .MBDViewProvider import ViewProviderSingleItemDatumTarget
 
 
 DATUM_TARGET_TYPES = ["Point", "Line", "Circle", "Rectangle", "Area"]
@@ -201,14 +201,6 @@ class MBDDatumTarget:
 
         add_property_if_missing(
             obj,
-            "App::PropertyLink",
-            "DisplayText",
-            "MBD_Target",
-            "Optional visible datum target label text helper"
-        )
-
-        add_property_if_missing(
-            obj,
             "App::PropertyString",
             "Standard",
             "MBD",
@@ -293,6 +285,29 @@ def straight_edge_geometry(edge):
 
 
 def line_geometry_from_target(obj):
+    if obj.ConstructionObject is None:
+        try:
+            start = obj.TargetEndPoint1
+            end = obj.TargetEndPoint2
+        except Exception:
+            return None
+
+        chord = end - start
+
+        if chord.Length <= 1e-9:
+            return None
+
+        direction = FreeCAD.Vector(chord)
+        direction.normalize()
+        return {
+            "type": "Line",
+            "point": (start + end) * 0.5,
+            "start": start,
+            "end": end,
+            "direction": direction,
+            "length": chord.Length,
+        }
+
     shape = _selected_construction_shape(obj)
 
     if shape is None:
@@ -308,61 +323,6 @@ def line_geometry_from_target(obj):
         pass
 
     return None
-
-
-def circular_edge_geometry(edge):
-    if edge is None or getattr(edge, "ShapeType", "") != "Edge":
-        return None
-
-    try:
-        curve = edge.Curve
-        curve_name = curve.__class__.__name__.lower()
-    except Exception:
-        return None
-
-    if "circle" not in curve_name:
-        return None
-
-    try:
-        center = FreeCAD.Vector(curve.Center)
-        radius = float(curve.Radius)
-        axis = FreeCAD.Vector(curve.Axis)
-    except Exception:
-        return None
-
-    if radius <= 0.0 or axis.Length <= 1e-9:
-        return None
-
-    axis.normalize()
-
-    try:
-        x_axis = FreeCAD.Vector(curve.XAxis)
-    except Exception:
-        x_axis = axis.cross(FreeCAD.Vector(0, 0, 1))
-
-        if x_axis.Length <= 1e-9:
-            x_axis = axis.cross(FreeCAD.Vector(0, 1, 0))
-
-    if x_axis.Length <= 1e-9:
-        return None
-
-    x_axis.normalize()
-    y_axis = axis.cross(x_axis)
-
-    if y_axis.Length <= 1e-9:
-        return None
-
-    y_axis.normalize()
-
-    return {
-        "type": "Circle",
-        "point": center,
-        "normal": axis,
-        "x_axis": x_axis,
-        "y_axis": y_axis,
-        "radius": radius,
-        "diameter": radius * 2.0,
-    }
 
 
 def target_plane_frame(obj):
@@ -385,7 +345,21 @@ def target_plane_frame(obj):
         normal = FreeCAD.Vector(0, 0, 1)
 
     normal.normalize()
-    x_axis = FreeCAD.Vector(1, 0, 0)
+    x_axis = None
+
+    try:
+        imported_direction = FreeCAD.Vector(obj.TargetDirection)
+        imported_direction = imported_direction - normal * imported_direction.dot(normal)
+
+        if imported_direction.Length > 1e-9:
+            imported_direction.normalize()
+            x_axis = imported_direction
+    except Exception:
+        x_axis = None
+
+    if x_axis is None:
+        x_axis = FreeCAD.Vector(1, 0, 0)
+
     x_axis = x_axis - normal * x_axis.dot(normal)
 
     if x_axis.Length <= 1e-9:
@@ -406,26 +380,6 @@ def target_plane_frame(obj):
 
 
 def circle_geometry_from_target(obj):
-    shape = _selected_construction_shape(obj)
-
-    if shape is not None:
-        # Legacy/import fallback: an actual circular edge can still define a
-        # circle target, but the normal GUI workflow is datum point + diameter.
-        if getattr(shape, "ShapeType", "") == "Edge":
-            circle = circular_edge_geometry(shape)
-
-            if circle is not None:
-                return circle
-
-        try:
-            if len(shape.Edges) == 1:
-                circle = circular_edge_geometry(shape.Edges[0])
-
-                if circle is not None:
-                    return circle
-        except Exception:
-            pass
-
     point = point_geometry_from_target(obj)
 
     if point is None:
@@ -461,7 +415,10 @@ def point_geometry_from_target(obj):
     construction = obj.ConstructionObject
 
     if construction is None:
-        return None
+        try:
+            return FreeCAD.Vector(obj.TargetPoint)
+        except Exception:
+            return None
 
     subelement = obj.ConstructionSubelement
 
@@ -492,121 +449,7 @@ def point_geometry_from_target(obj):
     return None
 
 
-def rectangular_face_geometry(face):
-    # Fallback for imported or test-created rectangular areas. Real users
-    # should not need to create model geometry solely to define a datum target;
-    # rectangle_geometry_from_target() also supports point + length + width.
-    if face is None or getattr(face, "ShapeType", "") != "Face":
-        return None
-
-    try:
-        surface_name = face.Surface.__class__.__name__.lower()
-    except Exception:
-        return None
-
-    if "plane" not in surface_name:
-        return None
-
-    try:
-        vertices = [vertex.Point for vertex in face.Vertexes]
-    except Exception:
-        return None
-
-    unique = []
-
-    for point in vertices:
-        if not any((point - existing).Length <= 1e-6 for existing in unique):
-            unique.append(point)
-
-    if len(unique) != 4:
-        return None
-
-    center = face.CenterOfMass
-    normal = face.normalAt(
-        sum(face.ParameterRange[:2]) * 0.5,
-        sum(face.ParameterRange[2:]) * 0.5
-    )
-
-    if normal.Length <= 1e-9:
-        return None
-
-    normal.normalize()
-    directions = []
-
-    try:
-        for edge in face.Edges:
-            line = straight_edge_geometry(edge)
-
-            if line is None:
-                return None
-
-            directions.append(line["direction"])
-    except Exception:
-        return None
-
-    primary = directions[0]
-    secondary = None
-
-    for direction in directions[1:]:
-        if abs(abs(primary.dot(direction)) - 1.0) > 1e-6:
-            secondary = direction
-            break
-
-    if secondary is None:
-        return None
-
-    primary.normalize()
-    secondary = secondary - primary * secondary.dot(primary)
-
-    if secondary.Length <= 1e-9:
-        return None
-
-    secondary.normalize()
-    width_values = [abs((point - center).dot(primary)) for point in unique]
-    height_values = [abs((point - center).dot(secondary)) for point in unique]
-    length = max(width_values) * 2.0
-    width = max(height_values) * 2.0
-
-    if length <= 1e-9 or width <= 1e-9:
-        return None
-
-    return {
-        "type": "Rectangle",
-        "point": center,
-        "normal": normal,
-        "x_axis": primary,
-        "y_axis": secondary,
-        "length": length,
-        "width": width,
-        "corners": [
-            center + primary * sx * length * 0.5 + secondary * sy * width * 0.5
-            for sx in (-1, 1)
-            for sy in (-1, 1)
-        ],
-    }
-
-
 def rectangle_geometry_from_target(obj):
-    shape = _selected_construction_shape(obj)
-
-    if shape is not None:
-        # Preserve the older face-derived path for imported fixtures and
-        # hand-built tests, but prefer the point-derived path below for GUI use.
-        if getattr(shape, "ShapeType", "") == "Face":
-            rectangle = rectangular_face_geometry(shape)
-
-            if rectangle is not None:
-                return rectangle
-
-        try:
-            if len(shape.Faces) == 1:
-                rectangle = rectangular_face_geometry(shape.Faces[0])
-
-                if rectangle is not None:
-                    return rectangle
-        except Exception:
-            pass
-
     point = point_geometry_from_target(obj)
 
     if point is None:

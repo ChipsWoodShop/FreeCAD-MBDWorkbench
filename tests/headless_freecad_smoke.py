@@ -13,25 +13,22 @@ import Part
 from pivy import coin
 from PySide import QtCore
 
-import MBDExporter
-import MBDBasicDimension
-import MBDDimension
-import MBDDatumTarget
-import MBDImporter
-import MBDValidation
-from MBDDatum import MBDDatumFeature, update_geometry_signature
-from MBDDatumSystem import (
+from freecad.mbd_workbench import MBDExporter
+from freecad.mbd_workbench import MBDBasicDimension
+from freecad.mbd_workbench import MBDDimension
+from freecad.mbd_workbench import MBDDatumTarget
+from freecad.mbd_workbench import MBDImporter
+from freecad.mbd_workbench import MBDValidation
+from freecad.mbd_workbench.MBDDatum import MBDDatumFeature, update_geometry_signature
+from freecad.mbd_workbench.MBDDatumSystem import (
     MBDDatumSystem,
     datum_system_label,
     datum_system_object_label,
     synchronize_datum_system_label,
 )
-from MBDFeatureControlFrame import MBDFeatureControlFrame
-from MBDPMI import (
-    migrate_semantic_pmi_global_links,
-    update_pmi_display_layout,
-)
-from MBDViewProvider import (
+from freecad.mbd_workbench.MBDFeatureControlFrame import MBDFeatureControlFrame
+from freecad.mbd_workbench.MBDPMI import update_pmi_display_layout
+from freecad.mbd_workbench.MBDViewProvider import (
     ViewProviderSingleItemFCF,
     ViewProviderSingleItemDatumFeature,
     ViewProviderSingleItemDatumTarget,
@@ -41,6 +38,7 @@ from MBDViewProvider import (
     fcf_attachment_point,
     fcf_cells as view_provider_fcf_cells,
     fcf_leader_segments,
+    runout_orientation_segments_and_labels,
     fcf_tolerance_width,
     symbol_segments,
 )
@@ -157,7 +155,7 @@ def export_smoke(mode, output_path, controlled_subelement):
     MBDExporter.QtGui.QMessageBox = AcceptMessageBox
 
     doc, box_obj = make_doc("MBDHeadlessSmoke")
-    datum_a, _, _, datum_system = make_datum_set(doc, box_obj)
+    datum_a, datum_b, datum_c, datum_system = make_datum_set(doc, box_obj)
 
     if mode == "fcf-no-diameter":
         add_position_fcf(doc, box_obj, datum_system, False, controlled_subelement)
@@ -174,6 +172,75 @@ def export_smoke(mode, output_path, controlled_subelement):
         fcf.MaterialConditionModifier = "MMC"
         fcf.ProjectedToleranceZone = True
         fcf.ProjectedToleranceHeight = 6.35
+        fcf.TangentPlaneModifier = True
+        fcf.StatisticalToleranceModifier = True
+        fcf.CommonZoneModifier = True
+        fcf.MaximumToleranceValueEnabled = True
+        fcf.MaximumToleranceValue = 0.02
+        profile = add_export_fcf(
+            doc,
+            box_obj,
+            "Profile",
+            "Face1",
+            datum_system=datum_system
+        )
+        profile.UnequallyDisposedZone = True
+        profile.UnequallyDisposedOffset = 0.5
+        profile.UnitBasisToleranceEnabled = True
+        profile.UnitBasisType = "Rectangular"
+        profile.UnitBasisPrimaryLength = 5.0
+        profile.UnitBasisSecondaryLength = 7.0
+        profile.NonUniformToleranceZone = True
+        line_profile_face = add_export_fcf(
+            doc,
+            box_obj,
+            "LineProfile",
+            "Face3",
+            datum_system=datum_system
+        )
+        line_profile_face.ProfileDirectionObject = box_obj
+        line_profile_face.ProfileDirectionSubelement = "Edge1"
+        line_profile_face.AffectedPlaneObject = box_obj
+        line_profile_face.AffectedPlaneSubelement = "Edge1"
+        line_profile_face.UnequallyDisposedZone = True
+        line_profile_face.UnequallyDisposedOffset = 0.25
+        line_profile_edge = add_export_fcf(
+            doc,
+            box_obj,
+            "LineProfile",
+            "Edge2",
+            datum_system=datum_system
+        )
+        line_profile_edge.UnequallyDisposedZone = True
+        line_profile_edge.UnequallyDisposedOffset = 0.1
+    elif mode == "fcf-runout-orientation":
+        for stale_obj in (datum_system, datum_a, datum_b, datum_c):
+            try:
+                doc.removeObject(stale_obj.Name)
+            except Exception:
+                pass
+
+        box_obj.Shape = Part.makeCylinder(5, 20)
+        doc.recompute()
+        cylinder_face = first_face_of_type(box_obj, "Cylinder")
+        datum_axis = doc.addObject(
+            "App::DocumentObjectGroupPython",
+            "MBD_DatumFeature_D"
+        )
+        MBDDatumFeature(datum_axis)
+        datum_axis.DatumLabel = "D"
+        datum_axis.DatumType = "Axis"
+        datum_axis.ReferencedObject = box_obj
+        datum_axis.ReferencedSubelement = cylinder_face
+        update_geometry_signature(datum_axis)
+        runout = add_export_fcf(
+            doc,
+            box_obj,
+            "CircularRunout",
+            cylinder_face,
+            datum_reference=datum_axis
+        )
+        runout.RunoutOrientationAngle = 30.0
     elif mode == "all-fcfs":
         add_export_fcf(
             doc,
@@ -265,6 +332,94 @@ def export_smoke(mode, output_path, controlled_subelement):
         if "PROJECTED_ZONE_DEFINITION" not in step_text:
             raise AssertionError(
                 "projected tolerance zone export did not write PROJECTED_ZONE_DEFINITION"
+            )
+
+        if hasattr(
+            MBDExporter.XDTO,
+            "XCAFDimTolObjects_GeomToleranceModif_Tangent_Plane"
+        ) and "TANGENT_PLANE" not in step_text:
+            raise AssertionError(
+                "tangent plane FCF export did not write TANGENT_PLANE"
+            )
+
+        if hasattr(
+            MBDExporter.XDTO,
+            "XCAFDimTolObjects_GeomToleranceModif_Statistical_Tolerance"
+        ) and "STATISTICAL_TOLERANCE" not in step_text:
+            raise AssertionError(
+                "statistical tolerance FCF export did not write STATISTICAL_TOLERANCE"
+            )
+
+        if hasattr(
+            MBDExporter.XDTO,
+            "XCAFDimTolObjects_GeomToleranceModif_Common_Zone"
+        ) and "COMMON_ZONE" not in step_text:
+            raise AssertionError(
+                "common zone FCF export did not write COMMON_ZONE"
+            )
+
+        if "UNEQUALLY_DISPOSED_GEOMETRIC_TOLERANCE" not in step_text:
+            raise AssertionError(
+                "unequally disposed profile export did not write UNEQUALLY_DISPOSED_GEOMETRIC_TOLERANCE"
+            )
+
+        if "GEOMETRIC_TOLERANCE_WITH_MAXIMUM_TOLERANCE" not in step_text:
+            raise AssertionError(
+                "maximum tolerance export did not write GEOMETRIC_TOLERANCE_WITH_MAXIMUM_TOLERANCE"
+            )
+
+        if "GEOMETRIC_TOLERANCE_WITH_DEFINED_UNIT" not in step_text:
+            raise AssertionError(
+                "unit-basis tolerance export did not write GEOMETRIC_TOLERANCE_WITH_DEFINED_UNIT"
+            )
+
+        if "GEOMETRIC_TOLERANCE_WITH_DEFINED_AREA_UNIT" not in step_text:
+            raise AssertionError(
+                "area unit-basis tolerance export did not write GEOMETRIC_TOLERANCE_WITH_DEFINED_AREA_UNIT"
+            )
+
+        if "NON_UNIFORM_ZONE_DEFINITION" not in step_text:
+            raise AssertionError(
+                "non-uniform tolerance zone export did not write NON_UNIFORM_ZONE_DEFINITION"
+            )
+
+        if "AFFECTED PLANE ASSOCIATION" not in step_text:
+            raise AssertionError(
+                "affected plane export did not write affected plane association"
+            )
+
+        if step_text.count("UNEQUALLY_DISPOSED_GEOMETRIC_TOLERANCE") < 2:
+            raise AssertionError(
+                "face-backed surface and line profile unequal-disposition exports were not both written"
+            )
+
+        converted_line_profile = MBDExporter.profile_tolerance_with_unequal_disposition(
+            "LINE_PROFILE_TOLERANCE('','',#1,#2)",
+            3
+        )
+
+        if (
+            converted_line_profile is None
+            or "GEOMETRIC_TOLERANCE('','',#1,#2)" not in converted_line_profile
+            or "LINE_PROFILE_TOLERANCE()" not in converted_line_profile
+            or "UNEQUALLY_DISPOSED_GEOMETRIC_TOLERANCE(#3)" not in converted_line_profile
+        ):
+            raise AssertionError(
+                "simple line-profile unequal-disposition conversion failed: {}".format(
+                    converted_line_profile
+                )
+            )
+
+    if mode == "fcf-runout-orientation":
+        with open(output_path, "r", encoding="utf-8", errors="ignore") as step_file:
+            step_text = step_file.read().upper()
+
+        if (
+            "RUNOUT_ZONE_ORIENTATION" not in step_text
+            or "PLANE_ANGLE_MEASURE(0.523598775598" not in step_text
+        ):
+            raise AssertionError(
+                "runout orientation angle export did not write the expected 30 degree angle"
             )
 
     print("headless smoke export passed:", mode, output_path, size)
@@ -416,6 +571,64 @@ END-ISO-10303-21;
         )
 
     print("AP242 PMI scan smoke passed")
+
+
+def runout_orientation_export_smoke(output_path):
+    step_text = """ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION(('AP242'),'2;1');
+ENDSEC;
+DATA;
+#1 = ( GEOMETRIC_REPRESENTATION_CONTEXT(3) GLOBAL_UNIT_ASSIGNED_CONTEXT((#2,#3)) REPRESENTATION_CONTEXT('','') );
+#2 = ( LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT($,.METRE.) );
+#3 = ( NAMED_UNIT(*) PLANE_ANGLE_UNIT() SI_UNIT($,.RADIAN.) );
+#4 = ADVANCED_BREP_SHAPE_REPRESENTATION('',(),#1);
+#5 = PRODUCT_DEFINITION_SHAPE('','',#6);
+#6 = PRODUCT_DEFINITION('','',#7,#8);
+#7 = PRODUCT_DEFINITION_FORMATION('','',#9);
+#8 = PRODUCT_DEFINITION_CONTEXT('',#10,'design');
+#9 = PRODUCT('','',(),());
+#10 = APPLICATION_CONTEXT('');
+#11 = ADVANCED_FACE('',(),#12,.T.);
+#12 = PLANE('',#13);
+#13 = AXIS2_PLACEMENT_3D('',#14,#15,#16);
+#14 = CARTESIAN_POINT('',(0.,0.,0.));
+#15 = DIRECTION('',(0.,0.,1.));
+#16 = DIRECTION('',(1.,0.,0.));
+#17 = SHAPE_ASPECT('','',#5,.T.);
+#18 = GEOMETRIC_ITEM_SPECIFIC_USAGE('','',#17,#4,#11);
+#19 = LENGTH_MEASURE_WITH_UNIT(LENGTH_MEASURE(0.1),#2);
+#20 = ( GEOMETRIC_TOLERANCE('','',#19,#17) CIRCULAR_RUNOUT_TOLERANCE() );
+#21 = TOLERANCE_ZONE_FORM('cylindrical or circular');
+#22 = TOLERANCE_ZONE('','',#5,.F.,(#20),#21);
+#23 = RUNOUT_ZONE_DEFINITION(#22,());
+#24 = RUNOUT_ZONE_ORIENTATION(#25);
+#25 = PLANE_ANGLE_MEASURE_WITH_UNIT(PLANE_ANGLE_MEASURE(0.),#3);
+ENDSEC;
+END-ISO-10303-21;
+"""
+    with open(output_path, "w", encoding="utf-8") as handle:
+        handle.write(step_text)
+
+    MBDExporter.append_step_runout_orientation_angles(
+        output_path,
+        [{
+            "name": "SyntheticRunout",
+            "subname": "Face1",
+            "tolerance_entity": "CIRCULAR_RUNOUT_TOLERANCE",
+            "angle_degrees": 30.0,
+        }]
+    )
+
+    with open(output_path, "r", encoding="utf-8", errors="ignore") as handle:
+        patched = handle.read()
+
+    if "PLANE_ANGLE_MEASURE(0.523598775598" not in patched:
+        raise AssertionError(
+            "runout orientation post-write patch did not write 30 degrees"
+        )
+
+    print("runout orientation export smoke passed")
 
 
 def dimension_export_smoke(output_path):
@@ -992,7 +1205,7 @@ def mixed_datum_target_sufficiency_smoke():
 
 
 def common_datum_system_validation_smoke():
-    import MBDCommands
+    from freecad.mbd_workbench import MBDCommands
 
     doc, box_obj = make_doc("MBDCommonDatumSystemValidationSmoke")
     datum_a = make_datum(doc, box_obj, "A", "Face1")
@@ -1485,36 +1698,6 @@ def single_item_fcf_layout_smoke():
     if not hasattr(restored_provider, "move_active"):
         raise AssertionError("restored FCF move state was not initialized")
 
-    import MBDCommands
-
-    MBDCommands.create_fcf_display(doc, fcf)
-    helper_names = [child.Name for child in fcf.Group]
-
-    if len(helper_names) < 4:
-        raise AssertionError("legacy FCF helper fixture was not created")
-
-    removed = MBDCommands.clear_fcf_display_helpers(doc, fcf)
-
-    if removed != len(helper_names):
-        raise AssertionError(
-            "removed {} FCF helpers, expected {}".format(
-                removed,
-                len(helper_names)
-            )
-        )
-
-    if fcf.Group:
-        raise AssertionError("legacy FCF helper group was not emptied")
-
-    if any(doc.getObject(name) is not None for name in helper_names):
-        raise AssertionError("legacy FCF helper objects remain in the document")
-
-    if any(
-        getattr(fcf, property_name, None) is not None
-        for property_name in ("DisplayFrame", "DisplayText", "DisplayLeader")
-    ):
-        raise AssertionError("legacy FCF helper links were not cleared")
-
     target = doc.addObject(
         "App::DocumentObjectGroupPython",
         "MBD_DatumTarget_A1"
@@ -1559,30 +1742,75 @@ def single_item_fcf_layout_smoke():
             "single-item line datum target scene graph is incomplete"
         )
 
-    MBDCommands.create_datum_target_display_text(doc, target)
-    target_helper_names = [child.Name for child in target.Group]
+    FreeCAD.closeDocument(doc.Name)
+    print("single-item FCF layout passed")
 
-    if not target_helper_names:
-        raise AssertionError("legacy datum target helper fixture was not created")
 
-    removed_targets = MBDCommands.clear_datum_target_display_helpers(
-        doc,
-        target
+def runout_orientation_display_smoke():
+    doc = FreeCAD.newDocument("MBDRunoutOrientationDisplaySmoke")
+    cone_obj = doc.addObject("Part::Feature", "RunoutCone")
+    cone_obj.Shape = Part.makeCone(4.0, 8.0, 20.0)
+    doc.recompute()
+
+    cone_face = None
+
+    for index, face in enumerate(cone_obj.Shape.Faces, start=1):
+        try:
+            if "cone" in face.Surface.__class__.__name__.lower():
+                cone_face = "Face{}".format(index)
+                break
+        except Exception:
+            pass
+
+    if cone_face is None:
+        FreeCAD.closeDocument(doc.Name)
+        raise AssertionError("test cone did not produce a conical face")
+
+    fcf = doc.addObject("App::FeaturePython", "MBD_FCF_CircularRunout")
+    MBDFeatureControlFrame(fcf)
+    fcf.ToleranceType = "CircularRunout"
+    fcf.ToleranceValue = 0.127
+    fcf.RunoutOrientationAngle = 30.0
+    fcf.ControlledObject = cone_obj
+    fcf.ControlledSubelement = cone_face
+    update_pmi_display_layout(
+        fcf,
+        FreeCAD.Vector(12, 12, 24),
+        FreeCAD.Vector(0, 0, 1),
+        FreeCAD.Vector(1, 0, 0),
+        4.0
     )
+    attachment = fcf_attachment_point(fcf)
 
-    if removed_targets != len(target_helper_names):
+    if attachment is None:
+        FreeCAD.closeDocument(doc.Name)
+        raise AssertionError("runout FCF attachment point was not resolved")
+
+    x_axis, y_axis, normal = annotation_basis(fcf)
+    segments, labels = runout_orientation_segments_and_labels(
+        fcf,
+        attachment,
+        fcf.AnnotationOrigin,
+        fcf.AnnotationTextHeight,
+        x_axis,
+        y_axis,
+        normal
+    )
+    FreeCAD.closeDocument(doc.Name)
+
+    if len(segments) < 3:
         raise AssertionError(
-            "removed {} target helpers, expected {}".format(
-                removed_targets,
-                len(target_helper_names)
+            "runout orientation display did not create axis/angle segments"
+        )
+
+    if not labels or labels[0][0] != "30°":
+        raise AssertionError(
+            "runout orientation display did not create a 30° label: {}".format(
+                labels
             )
         )
 
-    if target.Group or target.DisplayText is not None:
-        raise AssertionError("legacy datum target helper state was not cleared")
-
-    FreeCAD.closeDocument(doc.Name)
-    print("single-item FCF layout passed")
+    print("runout orientation display passed")
 
 
 def single_item_datum_feature_layout_smoke():
@@ -1619,69 +1847,6 @@ def single_item_datum_feature_layout_smoke():
     if view_provider.claimChildren():
         raise AssertionError("single-item datum feature claims helper children")
 
-    helper_names = []
-
-    for property_name, suffix in (
-        ("DisplayText", "_Text"),
-        ("DisplayFrame", "_Frame"),
-        ("DisplayMarker", "_Marker"),
-        ("DisplayLeader", "_Leader"),
-    ):
-        helper = doc.addObject("Part::Feature", datum.Name + suffix)
-        helper.Shape = Part.makeLine(
-            FreeCAD.Vector(0, 0, 0),
-            FreeCAD.Vector(1, 0, 0)
-        )
-        setattr(datum, property_name, helper)
-        datum.addObject(helper)
-        helper_names.append(helper.Name)
-
-    import MBDCommands
-
-    removed = MBDCommands.clear_datum_display_helpers(doc, datum)
-
-    if removed != len(helper_names):
-        raise AssertionError(
-            "removed {} datum helpers, expected {}".format(
-                removed,
-                len(helper_names)
-            )
-        )
-
-    if datum.Group:
-        raise AssertionError("legacy datum helper group was not emptied")
-
-    if any(doc.getObject(name) is not None for name in helper_names):
-        raise AssertionError("legacy datum helper objects remain")
-
-    if any(
-        getattr(datum, property_name, None) is not None
-        for property_name in (
-            "DisplayText",
-            "DisplayFrame",
-            "DisplayMarker",
-            "DisplayLeader",
-        )
-    ):
-        raise AssertionError("legacy datum helper links were not cleared")
-
-    legacy = make_datum(doc, box_obj, "B", "Face2")
-
-    for property_name in (
-        "AnnotationOrigin",
-        "AnnotationNormal",
-        "AnnotationDirection",
-        "AnnotationTextHeight",
-    ):
-        legacy.removeProperty(property_name)
-
-    legacy_fake_view = FakeViewObject(legacy)
-    legacy_provider = ViewProviderSingleItemDatumFeature(legacy_fake_view)
-    legacy_provider.attach(legacy_fake_view)
-
-    if not hasattr(legacy, "AnnotationOrigin"):
-        raise AssertionError("legacy datum display layout was not initialized")
-
     FreeCAD.closeDocument(doc.Name)
     print("single-item datum feature layout passed")
 
@@ -1689,7 +1854,7 @@ def single_item_datum_feature_layout_smoke():
 def single_item_dimension_layout_smoke():
     doc, box_obj = make_doc("MBDSingleItemDimensionLayoutSmoke")
 
-    import MBDCommands
+    from freecad.mbd_workbench import MBDCommands
 
     object_count = len(doc.Objects)
     layout = MBDCommands.dimension_display_layout(
@@ -1940,29 +2105,6 @@ def global_geometry_link_scope_smoke():
 
     if target.getTypeIdOfProperty("ParentDatum") != "App::PropertyLink":
         raise AssertionError("PMI-to-PMI parent datum link should remain local")
-
-    if fcf.getTypeIdOfProperty("DisplayFrame") != "App::PropertyLink":
-        raise AssertionError("display helper link should remain local")
-
-    legacy = doc.addObject("App::FeaturePython", "MBD_LegacyGeometryLink")
-    legacy.addProperty("App::PropertyBool", "IsSemanticPMI", "MBD")
-    legacy.IsSemanticPMI = True
-    legacy.addProperty("App::PropertyLink", "ReferencedObject", "MBD")
-    legacy.ReferencedObject = feature
-
-    migrated = migrate_semantic_pmi_global_links(doc)
-
-    if "MBD_LegacyGeometryLink.ReferencedObject" not in migrated:
-        raise AssertionError("legacy geometry link was not reported as migrated")
-
-    if (
-        legacy.getTypeIdOfProperty("ReferencedObject")
-        != "App::PropertyLinkGlobal"
-    ):
-        raise AssertionError("legacy geometry link type was not migrated")
-
-    if legacy.ReferencedObject is not feature:
-        raise AssertionError("legacy geometry link target was not preserved")
 
     datum_name = datum.Name
     feature_name = feature.Name
@@ -2329,6 +2471,102 @@ def fcf_rule_validation_smoke():
         FreeCAD.closeDocument(doc.Name)
         raise AssertionError(
             "position with unequal disposition should be rejected"
+        )
+
+    maximum_valid = make_fcf(
+        "MBD_FCF_Position_Maximum_Valid",
+        "Position",
+        cyl,
+        cylinder_face,
+        None,
+        datum_system_axis
+    )
+    maximum_valid.DiameterZone = True
+    maximum_valid.MaterialConditionModifier = "MMC"
+    maximum_valid.MaximumToleranceValueEnabled = True
+    maximum_valid.MaximumToleranceValue = 0.25
+    maximum_errors = MBDValidation.validate_fcf(maximum_valid)
+    maximum_cells = view_provider_fcf_cells(maximum_valid)
+    if maximum_errors:
+        FreeCAD.closeDocument(doc.Name)
+        raise AssertionError(
+            "maximum tolerance value with MMC should be valid: {}".format(
+                "; ".join(maximum_errors)
+            )
+        )
+    if "MAX" not in cell_text(maximum_cells):
+        FreeCAD.closeDocument(doc.Name)
+        raise AssertionError(
+            "maximum tolerance value was not displayed: {}".format(
+                maximum_cells
+            )
+        )
+
+    maximum_invalid = make_fcf(
+        "MBD_FCF_Position_Maximum_Invalid",
+        "Position",
+        cyl,
+        cylinder_face,
+        None,
+        datum_system_axis
+    )
+    maximum_invalid.MaximumToleranceValueEnabled = True
+    maximum_invalid.MaximumToleranceValue = 0.25
+    if not MBDValidation.validate_fcf(maximum_invalid):
+        FreeCAD.closeDocument(doc.Name)
+        raise AssertionError(
+            "maximum tolerance value without material condition should be rejected"
+        )
+
+    unit_basis_valid = make_fcf(
+        "MBD_FCF_Profile_UnitBasis_Valid",
+        "Profile",
+        box_obj,
+        "Face1"
+    )
+    unit_basis_valid.UnitBasisToleranceEnabled = True
+    unit_basis_valid.UnitBasisType = "Rectangular"
+    unit_basis_valid.UnitBasisPrimaryLength = 5.0
+    unit_basis_valid.UnitBasisSecondaryLength = 7.0
+    unit_errors = MBDValidation.validate_fcf(unit_basis_valid)
+    unit_cells = view_provider_fcf_cells(unit_basis_valid)
+    if unit_errors:
+        FreeCAD.closeDocument(doc.Name)
+        raise AssertionError(
+            "unit-basis tolerance should be valid: {}".format(
+                "; ".join(unit_errors)
+            )
+        )
+    if "/" not in cell_text(unit_cells):
+        FreeCAD.closeDocument(doc.Name)
+        raise AssertionError(
+            "unit-basis tolerance was not displayed: {}".format(unit_cells)
+        )
+
+    non_uniform_valid = make_fcf(
+        "MBD_FCF_Profile_NonUniform_Valid",
+        "Profile",
+        box_obj,
+        "Face1"
+    )
+    non_uniform_valid.NonUniformToleranceZone = True
+    if MBDValidation.validate_fcf(non_uniform_valid):
+        FreeCAD.closeDocument(doc.Name)
+        raise AssertionError(
+            "profile non-uniform tolerance zone should be valid"
+        )
+
+    non_uniform_invalid = make_fcf(
+        "MBD_FCF_Flatness_NonUniform_Invalid",
+        "Flatness",
+        box_obj,
+        "Face1"
+    )
+    non_uniform_invalid.NonUniformToleranceZone = True
+    if not MBDValidation.validate_fcf(non_uniform_invalid):
+        FreeCAD.closeDocument(doc.Name)
+        raise AssertionError(
+            "flatness non-uniform tolerance zone should be rejected"
         )
 
     FreeCAD.closeDocument(doc.Name)
@@ -2772,7 +3010,7 @@ def cylinder_axis_dimension_smoke():
 def position_fcf_hole_opening_direction_smoke():
     doc = FreeCAD.newDocument("MBDPositionFCFHoleOpeningSmoke")
 
-    import MBDCommands
+    from freecad.mbd_workbench import MBDCommands
 
     body = doc.addObject("Part::Feature", "BlindHoleBody")
     box = Part.makeBox(40, 40, 30)
@@ -3022,7 +3260,7 @@ def position_fcf_hole_opening_direction_smoke():
 def radius_dimension_display_smoke():
     doc = FreeCAD.newDocument("MBDRadiusDimensionDisplaySmoke")
 
-    import MBDCommands
+    from freecad.mbd_workbench import MBDCommands
 
     cyl = doc.addObject("Part::Feature", "RadiusCylinder")
     cyl.Shape = Part.makeCylinder(
@@ -3096,7 +3334,7 @@ def radius_dimension_display_smoke():
 def annotation_display_shape_smoke():
     doc, _box_obj = make_doc("MBDAnnotationDisplayShapeSmoke")
 
-    import MBDCommands
+    from freecad.mbd_workbench import MBDCommands
 
     p1 = FreeCAD.Vector(0, 0, 0)
     p2 = FreeCAD.Vector(10, 0, 0)
@@ -3135,7 +3373,7 @@ def annotation_display_shape_smoke():
 def preferred_display_offset_clears_model_smoke():
     doc, _box_obj = make_doc("MBDPreferredDisplayOffsetSmoke")
 
-    import MBDCommands
+    from freecad.mbd_workbench import MBDCommands
 
     text_height = 3.0
     p1 = FreeCAD.Vector(2, 5, 12)
@@ -3167,39 +3405,10 @@ def preferred_display_offset_clears_model_smoke():
     print("preferred display offset clears model passed")
 
 
-def gdt_symbol_table_smoke():
-    doc = FreeCAD.newDocument("MBDGDTSymbolTableSmoke")
-
-    import MBDCommands
-
-    group = MBDCommands.create_geometric_tolerance_symbol_table(doc)
-    symbol_count = 0
-
-    for obj in doc.Objects:
-        if obj.Label.endswith("_Symbol"):
-            symbol_count += 1
-
-    expected_count = len(MBDCommands.GEOMETRIC_TOLERANCE_SYMBOLS)
-    FreeCAD.closeDocument(doc.Name)
-
-    if group is None:
-        raise AssertionError("GD&T symbol table group was not created")
-
-    if symbol_count != expected_count:
-        raise AssertionError(
-            "expected {} symbol objects, found {}".format(
-                expected_count,
-                symbol_count
-            )
-        )
-
-    print("GD&T symbol table passed")
-
-
 def grouped_display_helpers_smoke():
     doc, box_obj = make_doc("MBDGroupedDisplayHelpersSmoke")
 
-    import MBDCommands
+    from freecad.mbd_workbench import MBDCommands
 
     datum = doc.addObject(
         "App::DocumentObjectGroupPython",
@@ -3246,7 +3455,7 @@ def grouped_display_helpers_smoke():
 
 
 def fcf_tolerance_units_smoke():
-    import MBDCommands
+    from freecad.mbd_workbench import MBDCommands
 
     inch_value = MBDCommands.parse_length_quantity_text("0.005 in")
     mm_value = MBDCommands.parse_length_quantity_text("0.127 mm")
@@ -3265,7 +3474,7 @@ def fcf_tolerance_units_smoke():
 def fcf_below_dimension_smoke():
     doc, box_obj = make_doc("MBDFCFBelowDimensionSmoke")
 
-    import MBDCommands
+    from freecad.mbd_workbench import MBDCommands
 
     dim_obj = doc.addObject(
         "App::DocumentObjectGroupPython",
@@ -3327,7 +3536,7 @@ def fcf_below_dimension_smoke():
 def flatness_fcf_display_smoke():
     doc, box_obj = make_doc("MBDFlatnessFCFDisplaySmoke")
 
-    import MBDCommands
+    from freecad.mbd_workbench import MBDCommands
 
     fcf = doc.addObject(
         "App::DocumentObjectGroupPython",
@@ -3356,7 +3565,7 @@ def flatness_fcf_display_smoke():
 def parallelism_fcf_display_smoke():
     doc, box_obj = make_doc("MBDParallelismFCFDisplaySmoke")
 
-    import MBDCommands
+    from freecad.mbd_workbench import MBDCommands
 
     datum_a, _datum_b, _datum_c, _datum_system = make_datum_set(doc, box_obj)
     fcf = doc.addObject(
@@ -3397,7 +3606,7 @@ def parallelism_fcf_display_smoke():
 def perpendicularity_fcf_display_smoke():
     doc, box_obj = make_doc("MBDPerpendicularityFCFDisplaySmoke")
 
-    import MBDCommands
+    from freecad.mbd_workbench import MBDCommands
 
     datum_a, _datum_b, _datum_c, _datum_system = make_datum_set(doc, box_obj)
     fcf = doc.addObject(
@@ -3438,7 +3647,7 @@ def perpendicularity_fcf_display_smoke():
 def profile_fcf_display_smoke():
     doc, box_obj = make_doc("MBDProfileFCFDisplaySmoke")
 
-    import MBDCommands
+    from freecad.mbd_workbench import MBDCommands
 
     preferred_point = FreeCAD.Vector(5, 10, 30)
     box_obj.Shape = box_obj.Shape.cut(
@@ -3508,7 +3717,7 @@ def profile_fcf_display_smoke():
 def line_profile_fcf_display_smoke():
     doc, box_obj = make_doc("MBDLineProfileFCFDisplaySmoke")
 
-    import MBDCommands
+    from freecad.mbd_workbench import MBDCommands
 
     fcf = doc.addObject(
         "App::DocumentObjectGroupPython",
@@ -3550,7 +3759,7 @@ def line_profile_fcf_display_smoke():
 def flatness_fcf_exterior_leader_smoke():
     doc, box_obj = make_doc("MBDFlatnessFCFExteriorLeaderSmoke")
 
-    import MBDCommands
+    from freecad.mbd_workbench import MBDCommands
 
     fcf = doc.addObject(
         "App::DocumentObjectGroupPython",
@@ -3588,7 +3797,7 @@ def flatness_fcf_exterior_leader_smoke():
 def exterior_direction_centroid_smoke():
     doc, box_obj = make_doc("MBDExteriorDirectionCentroidSmoke")
 
-    import MBDCommands
+    from freecad.mbd_workbench import MBDCommands
 
     point = MBDCommands.referenced_subelement_center(box_obj, "Face1")
     doc_center, _doc_size = MBDCommands.document_shape_center_and_size(doc)
@@ -3606,7 +3815,7 @@ def exterior_direction_centroid_smoke():
 def oriented_face_normals_smoke():
     doc, box_obj = make_doc("MBDOrientedFaceNormalsSmoke")
 
-    import MBDCommands
+    from freecad.mbd_workbench import MBDCommands
 
     doc_center, _doc_size = MBDCommands.document_shape_center_and_size(doc)
 
@@ -3643,7 +3852,7 @@ def oriented_face_normals_smoke():
 def surface_solid_probe_smoke():
     doc, box_obj = make_doc("MBDSurfaceSolidProbeSmoke")
 
-    import MBDCommands
+    from freecad.mbd_workbench import MBDCommands
 
     doc_center, _doc_size = MBDCommands.document_shape_center_and_size(doc)
 
@@ -3688,7 +3897,7 @@ def surface_solid_probe_smoke():
 def pmi_text_height_ignores_helpers_smoke():
     doc, box_obj = make_doc("MBDTextHeightIgnoresHelpersSmoke")
 
-    import MBDCommands
+    from freecad.mbd_workbench import MBDCommands
 
     base_height = MBDCommands.pmi_text_height(doc)
     fcf = doc.addObject(
@@ -3743,6 +3952,7 @@ def main():
             "fcf-no-diameter",
             "fcf-diameter",
             "fcf-material-modifier",
+            "fcf-runout-orientation",
             "all-fcfs",
             "stale-cancel",
             "ap242-pmi-scan",
@@ -3759,6 +3969,7 @@ def main():
             "common-datum-export",
             "display-layout-metadata",
             "single-item-fcf-layout",
+            "runout-orientation-display",
             "single-item-datum-feature-layout",
             "single-item-dimension-layout",
             "global-geometry-link-scope",
@@ -3770,7 +3981,6 @@ def main():
             "radius-dimension-display",
             "annotation-display-shape",
             "preferred-display-offset",
-            "gdt-symbol-table",
             "grouped-display-helpers",
             "fcf-tolerance-units",
             "fcf-below-dimension",
@@ -3785,15 +3995,18 @@ def main():
             "surface-solid-probe",
             "pmi-text-height-ignores-helpers",
         ],
-        default="datum-only"
+        default=os.environ.get("MBD_HEADLESS_SMOKE_MODE", "datum-only")
     )
     parser.add_argument(
         "--output",
-        default="/tmp/mbd_headless_smoke.step"
+        default=os.environ.get(
+            "MBD_HEADLESS_SMOKE_OUTPUT",
+            "/tmp/mbd_headless_smoke.step"
+        )
     )
     parser.add_argument(
         "--controlled-subelement",
-        default="Face1"
+        default=os.environ.get("MBD_HEADLESS_SMOKE_CONTROLLED_SUBELEMENT", "Face1")
     )
     args = parser.parse_args()
 
@@ -3801,6 +4014,8 @@ def main():
         basic_dimension_projection_smoke()
     elif args.mode == "ap242-pmi-scan":
         ap242_pmi_scan_smoke(args.output)
+    elif args.mode == "fcf-runout-orientation":
+        runout_orientation_export_smoke(args.output)
     elif args.mode == "semantic-dimension":
         semantic_dimension_smoke()
     elif args.mode == "dimension-semantic-rules":
@@ -3825,6 +4040,8 @@ def main():
         display_layout_metadata_smoke()
     elif args.mode == "single-item-fcf-layout":
         single_item_fcf_layout_smoke()
+    elif args.mode == "runout-orientation-display":
+        runout_orientation_display_smoke()
     elif args.mode == "single-item-datum-feature-layout":
         single_item_datum_feature_layout_smoke()
     elif args.mode == "single-item-dimension-layout":
@@ -3847,8 +4064,6 @@ def main():
         annotation_display_shape_smoke()
     elif args.mode == "preferred-display-offset":
         preferred_display_offset_clears_model_smoke()
-    elif args.mode == "gdt-symbol-table":
-        gdt_symbol_table_smoke()
     elif args.mode == "grouped-display-helpers":
         grouped_display_helpers_smoke()
     elif args.mode == "fcf-tolerance-units":

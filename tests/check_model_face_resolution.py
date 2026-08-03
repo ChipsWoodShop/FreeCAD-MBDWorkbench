@@ -11,8 +11,8 @@ sys.path.insert(0, str(WORKBENCH_DIR))
 
 import FreeCAD
 
-import MBDExporter
-from MBDDatum import update_geometry_signature
+from freecad.mbd_workbench import MBDExporter
+from freecad.mbd_workbench.MBDDatum import update_geometry_signature
 
 
 class AcceptMessageBox:

@@ -2,20 +2,23 @@
 
 import FreeCAD
 import json
+import math
+import re
 
-import MBDBasicDimension
-import MBDDimension
-import MBDDatumTarget
-from MBDDatumSystem import (
+from . import MBDBasicDimension
+from . import MBDDimension
+from . import MBDDatumTarget
+from .MBDDatumSystem import (
     datum_system_compartments,
     datum_system_datums,
     datum_system_label,
     is_datum_system_object,
 )
-from MBDPMI import ensure_pmi_identity, pmi_id
+from .MBDPMI import ensure_pmi_identity, pmi_id
 
 
 SEMANTIC_VALUE_EPSILON = 1e-9
+SUBELEMENT_PATTERN = re.compile(r"^(Face|Edge|Vertex)(\d+)$")
 
 
 class ValidationIssue:
@@ -84,6 +87,38 @@ def is_mbd_dimension(obj):
     )
 
 
+def subelement_exists(ref_obj, subelement):
+    if ref_obj is None or not subelement:
+        return False
+
+    match = SUBELEMENT_PATTERN.match(str(subelement))
+
+    if not match:
+        return False
+
+    kind, index_text = match.groups()
+    index = int(index_text)
+
+    if index < 1:
+        return False
+
+    try:
+        shape = ref_obj.Shape
+
+        if kind == "Face":
+            return index <= len(shape.Faces)
+
+        if kind == "Edge":
+            return index <= len(shape.Edges)
+
+        if kind == "Vertex":
+            return index <= len(shape.Vertexes)
+    except Exception:
+        return False
+
+    return False
+
+
 def validate_datum(obj):
     errors = []
 
@@ -97,39 +132,74 @@ def validate_datum(obj):
         errors.append("{} has no referenced subelement.".format(obj.Name))
 
     if obj.ReferencedObject and obj.ReferencedSubelement:
-        sub_names = []
-
-        try:
-            shape = obj.ReferencedObject.Shape
-
-            sub_names.extend(
-                ["Face{}".format(i + 1) for i in range(len(shape.Faces))]
-            )
-            sub_names.extend(
-                ["Edge{}".format(i + 1) for i in range(len(shape.Edges))]
-            )
-            sub_names.extend(
-                ["Vertex{}".format(i + 1) for i in range(len(shape.Vertexes))]
-            )
-
-            if obj.ReferencedSubelement not in sub_names:
-                errors.append(
-                    "{} references {}, but that subelement no longer exists on {}.".format(
-                        obj.Name,
-                        obj.ReferencedSubelement,
-                        obj.ReferencedObject.Name
-                    )
-                )
-
-        except Exception as e:
+        if not subelement_exists(obj.ReferencedObject, obj.ReferencedSubelement):
             errors.append(
-                "{} could not validate referenced geometry: {}".format(
+                "{} references {}, but that subelement no longer exists on {}.".format(
                     obj.Name,
-                    str(e)
+                    obj.ReferencedSubelement,
+                    obj.ReferencedObject.Name
+                )
+            )
+
+    referenced_subelements = [
+        str(item)
+        for item in getattr(obj, "ReferencedSubelementList", [])
+        if str(item)
+    ]
+
+    for subelement in referenced_subelements:
+        if subelement == obj.ReferencedSubelement:
+            continue
+
+        if obj.ReferencedObject and not subelement_exists(
+            obj.ReferencedObject,
+            subelement
+        ):
+            errors.append(
+                "{} references {}, but that subelement no longer exists on {}.".format(
+                    obj.Name,
+                    subelement,
+                    obj.ReferencedObject.Name
                 )
             )
 
     return errors
+
+
+def datum_referenced_subelements(obj):
+    """Return every referenced datum subelement, preserving old single-face data."""
+    subelements = [
+        str(item)
+        for item in getattr(obj, "ReferencedSubelementList", [])
+        if str(item)
+    ]
+
+    primary = str(getattr(obj, "ReferencedSubelement", ""))
+
+    if primary and primary not in subelements:
+        subelements.insert(0, primary)
+
+    return subelements
+
+
+def datum_attachment_text(obj):
+    referenced_object = (
+        obj.ReferencedObject.Name
+        if getattr(obj, "ReferencedObject", None)
+        else "<none>"
+    )
+    subelements = datum_referenced_subelements(obj)
+
+    if not subelements:
+        return "{}.".format(referenced_object)
+
+    if len(subelements) == 1:
+        return "{}.{}".format(referenced_object, subelements[0])
+
+    return "{}.{}".format(
+        referenced_object,
+        ", ".join(subelements)
+    )
 
 
 def validate_datum_target(obj):
@@ -152,9 +222,6 @@ def validate_datum_target(obj):
     elif not is_mbd_datum(obj.ParentDatum):
         errors.append("{} references an invalid parent datum.".format(obj.Name))
 
-    if obj.ConstructionObject is None:
-        errors.append("{} has no construction object.".format(obj.Name))
-
     if obj.ReferencedObject is None:
         errors.append("{} has no inspected surface object.".format(obj.Name))
 
@@ -162,6 +229,9 @@ def validate_datum_target(obj):
         errors.append("{} has no inspected surface subelement.".format(obj.Name))
 
     point = MBDDatumTarget.get_point_from_target(obj)
+
+    if obj.ConstructionObject is None and point is None:
+        errors.append("{} has no construction object.".format(obj.Name))
 
     if point is None:
         errors.append(
@@ -601,6 +671,9 @@ def _target_support_points(target):
 
         return [line["start"], line["end"]]
 
+    if str(target.TargetType) in ("Circle", "Rectangle", "Area"):
+        return MBDDatumTarget.target_sample_points(target)
+
     point = MBDDatumTarget.get_point_from_target(target)
     return [point] if point is not None else []
 
@@ -830,6 +903,9 @@ def attachment_text(obj):
             obj.ControlledSubelement
         )
 
+    if is_mbd_datum(obj):
+        return datum_attachment_text(obj)
+
     if hasattr(obj, "ReferencedObject"):
         referenced_object = (
             obj.ReferencedObject.Name
@@ -892,21 +968,60 @@ def validate_geometry_signature(obj):
         ]
 
     ref_obj = obj.ReferencedObject
-    sub = obj.ReferencedSubelement
+    stored_subelement_signatures = [
+        item
+        for item in old_sig.get("ReferencedSubelements", [])
+        if isinstance(item, dict)
+    ]
 
+    if stored_subelement_signatures:
+        warning_items = []
+
+        for stored_signature in stored_subelement_signatures:
+            sub = stored_signature.get("ReferencedSubelement", "")
+            warning_items.extend(
+                geometry_signature_warnings_for_subelement(
+                    obj,
+                    ref_obj,
+                    sub,
+                    stored_signature
+                )
+            )
+
+        obj.GeometrySignatureValid = len(warning_items) == 0
+
+        return [
+            ValidationIssue("warning", obj, warning, sub)
+            for sub, warning in warning_items
+        ]
+
+    sub = obj.ReferencedSubelement
+    warning_items = geometry_signature_warnings_for_subelement(
+        obj,
+        ref_obj,
+        sub,
+        old_sig
+    )
+
+    obj.GeometrySignatureValid = len(warning_items) == 0
+
+    return [
+        ValidationIssue("warning", obj, warning, subelement)
+        for subelement, warning in warning_items
+    ]
+
+
+def geometry_signature_warnings_for_subelement(obj, ref_obj, sub, old_sig):
     try:
         target = ref_obj.Shape.getElement(sub)
     except Exception as e:
-        obj.GeometrySignatureValid = False
         return [
-            ValidationIssue(
-                "warning",
-                obj,
+            (
+                sub,
                 "referenced subelement {} could not be resolved: {}".format(
                     sub,
                     e
-                ),
-                sub
+                )
             )
         ]
 
@@ -928,7 +1043,7 @@ def validate_geometry_signature(obj):
 
             if dist > 0.5:
                 warnings.append(
-                    "center of mass moved {:.3f} mm".format(dist)
+                    (sub, "center of mass moved {:.3f} mm".format(dist))
                 )
     except Exception:
         pass
@@ -942,7 +1057,7 @@ def validate_geometry_signature(obj):
 
             if pct > 5.0:
                 warnings.append(
-                    "area changed by {:.1f}%".format(pct)
+                    (sub, "area changed by {:.1f}%".format(pct))
                 )
     except Exception:
         pass
@@ -961,29 +1076,23 @@ def validate_geometry_signature(obj):
 
         if old_type and old_type != new_type:
             warnings.append(
-                "geometry type changed from {} to {}".format(
-                    old_type,
-                    new_type
+                (
+                    sub,
+                    "geometry type changed from {} to {}".format(
+                        old_type,
+                        new_type
+                    )
                 )
             )
     except Exception:
         pass
 
-    obj.GeometrySignatureValid = len(warnings) == 0
-
-    return [
-        ValidationIssue(
-            "warning",
-            obj,
-            warning,
-            sub
-        )
-        for warning in warnings
-    ]
+    return warnings
 
 
 def validate_document_structured(doc):
     issues = []
+    geometry_cache = {}
     datum_objects = [obj for obj in doc.Objects if is_mbd_datum(obj)]
     datum_targets = [obj for obj in doc.Objects if is_mbd_datum_target(obj)]
     basic_dimensions = [obj for obj in doc.Objects if is_mbd_basic_dimension(obj)]
@@ -1022,7 +1131,7 @@ def validate_document_structured(doc):
             issues.append(ValidationIssue("error", obj, error))
 
     for obj in fcf_objects:
-        for error in validate_fcf(obj):
+        for error in validate_fcf(obj, geometry_cache):
             issues.append(ValidationIssue("error", obj, error))
 
     return {
@@ -1036,14 +1145,27 @@ def validate_document_structured(doc):
     }
 
 
-def subshape_from_reference(ref_obj, subelement):
+def subshape_from_reference(ref_obj, subelement, geometry_cache=None):
     if ref_obj is None or not subelement:
         return None
 
+    cache_key = None
+
+    if geometry_cache is not None:
+        cache_key = (getattr(ref_obj, "Name", id(ref_obj)), str(subelement))
+
+        if cache_key in geometry_cache:
+            return geometry_cache[cache_key]
+
     try:
-        return ref_obj.Shape.getElement(subelement)
+        shape = ref_obj.Shape.getElement(subelement)
     except Exception:
-        return None
+        shape = None
+
+    if geometry_cache is not None:
+        geometry_cache[cache_key] = shape
+
+    return shape
 
 
 def geometry_class_name(shape):
@@ -1066,8 +1188,8 @@ def geometry_class_name(shape):
     return "Unknown"
 
 
-def geometry_kind(ref_obj, subelement):
-    shape = subshape_from_reference(ref_obj, subelement)
+def geometry_kind(ref_obj, subelement, geometry_cache=None):
+    shape = subshape_from_reference(ref_obj, subelement, geometry_cache)
     class_name = geometry_class_name(shape)
     lowered = class_name.lower()
     sub = str(subelement)
@@ -1114,24 +1236,25 @@ def geometry_kind(ref_obj, subelement):
     return result
 
 
-def datum_geometry_kind(datum_obj):
+def datum_geometry_kind(datum_obj, geometry_cache=None):
     if datum_obj is None:
         return None
 
     return geometry_kind(
         getattr(datum_obj, "ReferencedObject", None),
-        getattr(datum_obj, "ReferencedSubelement", "")
+        getattr(datum_obj, "ReferencedSubelement", ""),
+        geometry_cache
     )
 
 
-def datum_is_axis_capable(datum_obj):
+def datum_is_axis_capable(datum_obj, geometry_cache=None):
     if datum_obj is None:
         return False
 
     if str(getattr(datum_obj, "DatumType", "")) == "Axis":
         return True
 
-    kind = datum_geometry_kind(datum_obj)
+    kind = datum_geometry_kind(datum_obj, geometry_cache)
 
     if kind is None:
         return False
@@ -1139,14 +1262,14 @@ def datum_is_axis_capable(datum_obj):
     return kind["is_axis_capable"]
 
 
-def datum_is_plane_capable(datum_obj):
+def datum_is_plane_capable(datum_obj, geometry_cache=None):
     if datum_obj is None:
         return False
 
     if str(getattr(datum_obj, "DatumType", "")) == "Plane":
         return True
 
-    kind = datum_geometry_kind(datum_obj)
+    kind = datum_geometry_kind(datum_obj, geometry_cache)
 
     if kind is None:
         return False
@@ -1154,23 +1277,24 @@ def datum_is_plane_capable(datum_obj):
     return kind["is_plane"]
 
 
-def datum_system_is_axis_capable(datum_system):
+def datum_system_is_axis_capable(datum_system, geometry_cache=None):
     if datum_system is None:
         return False
 
     for datum in datum_system_datums(datum_system):
-        if datum_is_axis_capable(datum):
+        if datum_is_axis_capable(datum, geometry_cache):
             return True
 
     return False
 
 
-def datum_system_is_plane_or_axis_capable(datum_system):
+def datum_system_is_plane_or_axis_capable(datum_system, geometry_cache=None):
     if datum_system is None:
         return False
 
     return any(
-        datum_is_plane_capable(datum) or datum_is_axis_capable(datum)
+        datum_is_plane_capable(datum, geometry_cache)
+        or datum_is_axis_capable(datum, geometry_cache)
         for datum in datum_system_datums(datum_system)
     )
 
@@ -1182,7 +1306,22 @@ def fcf_has_datum_reference(obj):
     )
 
 
-def validate_fcf_rule_set(obj):
+def fcf_has_modifier(obj):
+    material_modifier = str(
+        getattr(obj, "MaterialConditionModifier", "None")
+    )
+
+    return (
+        material_modifier in ("MMC", "LMC")
+        or bool(getattr(obj, "ProjectedToleranceZone", False))
+        or bool(getattr(obj, "UnequallyDisposedZone", False))
+        or bool(getattr(obj, "TangentPlaneModifier", False))
+        or bool(getattr(obj, "StatisticalToleranceModifier", False))
+        or bool(getattr(obj, "CommonZoneModifier", False))
+    )
+
+
+def validate_fcf_rule_set(obj, geometry_cache=None):
     errors = []
     tolerance_type = str(getattr(obj, "ToleranceType", ""))
 
@@ -1191,7 +1330,8 @@ def validate_fcf_rule_set(obj):
 
     controlled_kind = geometry_kind(
         getattr(obj, "ControlledObject", None),
-        getattr(obj, "ControlledSubelement", "")
+        getattr(obj, "ControlledSubelement", ""),
+        geometry_cache
     )
 
     if controlled_kind["shape"] is None:
@@ -1251,8 +1391,8 @@ def validate_fcf_rule_set(obj):
             datum_ref = obj.DatumReference
 
             if not (
-                datum_is_plane_capable(datum_ref)
-                or datum_is_axis_capable(datum_ref)
+                datum_is_plane_capable(datum_ref, geometry_cache)
+                or datum_is_axis_capable(datum_ref, geometry_cache)
             ):
                 errors.append(
                     "{} datum reference {} does not establish a plane or axis for {}.".format(
@@ -1261,7 +1401,10 @@ def validate_fcf_rule_set(obj):
                         tolerance_type
                     )
                 )
-        elif not datum_system_is_plane_or_axis_capable(obj.DatumSystem):
+        elif not datum_system_is_plane_or_axis_capable(
+            obj.DatumSystem,
+            geometry_cache
+        ):
             errors.append(
                 "{} datum system does not establish a plane or axis for {}.".format(
                     obj.Name,
@@ -1286,8 +1429,8 @@ def validate_fcf_rule_set(obj):
             datum_ref = obj.DatumReference
 
             if not (
-                datum_is_plane_capable(datum_ref)
-                or datum_is_axis_capable(datum_ref)
+                datum_is_plane_capable(datum_ref, geometry_cache)
+                or datum_is_axis_capable(datum_ref, geometry_cache)
             ):
                 errors.append(
                     "{} datum reference {} does not establish a plane or axis for angularity.".format(
@@ -1297,7 +1440,10 @@ def validate_fcf_rule_set(obj):
                 )
         elif (
             getattr(obj, "DatumSystem", None) is not None
-            and not datum_system_is_plane_or_axis_capable(obj.DatumSystem)
+            and not datum_system_is_plane_or_axis_capable(
+                obj.DatumSystem,
+                geometry_cache
+            )
         ):
             errors.append(
                 "{} datum system does not establish a plane or axis for angularity.".format(
@@ -1336,12 +1482,41 @@ def validate_fcf_rule_set(obj):
             )
 
     if tolerance_type == "LineProfile":
-        if not controlled_kind["is_edge"]:
+        direction_kind = geometry_kind(
+            getattr(obj, "ProfileDirectionObject", None),
+            getattr(obj, "ProfileDirectionSubelement", ""),
+            geometry_cache
+        )
+        face_with_direction = (
+            controlled_kind["is_face"]
+            and direction_kind["is_edge"]
+        )
+
+        if not (controlled_kind["is_edge"] or face_with_direction):
             errors.append(
-                "{} line profile must control an edge or curve; {} is {}.".format(
+                "{} line profile must control an edge/curve, or a face with a stored profile direction line; {} is {}.".format(
                     obj.Name,
                     obj.ControlledSubelement,
                     controlled_kind["class_name"]
+                )
+            )
+
+    affected_plane_obj = getattr(obj, "AffectedPlaneObject", None)
+    affected_plane_sub = getattr(obj, "AffectedPlaneSubelement", "")
+
+    if affected_plane_obj is not None or affected_plane_sub:
+        affected_kind = geometry_kind(
+            affected_plane_obj,
+            affected_plane_sub,
+            geometry_cache
+        )
+
+        if not (affected_kind["is_edge"] and affected_kind["is_line"]):
+            errors.append(
+                "{} affected plane must be defined by a selected datum line or straight edge; {} is {}.".format(
+                    obj.Name,
+                    affected_plane_sub or "<none>",
+                    affected_kind["class_name"]
                 )
             )
 
@@ -1359,7 +1534,7 @@ def validate_fcf_rule_set(obj):
         if fcf_has_datum_reference(obj):
             datum_ref = obj.DatumReference
 
-            if not datum_is_axis_capable(datum_ref):
+            if not datum_is_axis_capable(datum_ref, geometry_cache):
                 errors.append(
                     "{} datum reference {} must establish an axis for {}.".format(
                         obj.Name,
@@ -1368,7 +1543,10 @@ def validate_fcf_rule_set(obj):
                     )
                 )
         elif getattr(obj, "DatumSystem", None) is not None:
-            if not datum_system_is_axis_capable(obj.DatumSystem):
+            if not datum_system_is_axis_capable(
+                obj.DatumSystem,
+                geometry_cache
+            ):
                 errors.append(
                     "{} datum system must include an axis-capable datum for {}.".format(
                         obj.Name,
@@ -1379,7 +1557,7 @@ def validate_fcf_rule_set(obj):
     return errors
 
 
-def validate_fcf(obj):
+def validate_fcf(obj, geometry_cache=None):
 
     errors = []
 
@@ -1405,9 +1583,17 @@ def validate_fcf(obj):
         )
 
     if material_modifier in ("MMC", "LMC"):
-        if tolerance_type != "Position":
+        material_modifier_types = (
+            "Angularity",
+            "Parallelism",
+            "Perpendicularity",
+            "Position",
+            "Straightness",
+        )
+
+        if tolerance_type not in material_modifier_types:
             errors.append(
-                "{} material condition modifiers are currently supported only on position tolerances.".format(
+                "{} material condition modifiers require a feature-of-size tolerance such as position, orientation, or axis straightness.".format(
                     obj.Name
                 )
             )
@@ -1417,6 +1603,24 @@ def validate_fcf(obj):
                     obj.Name
                 )
             )
+        if obj.ControlledObject is not None and obj.ControlledSubelement:
+            controlled_kind = geometry_kind(
+                obj.ControlledObject,
+                obj.ControlledSubelement,
+                geometry_cache
+            )
+
+            if (
+                controlled_kind["shape"] is not None
+                and not controlled_kind["is_axis_capable"]
+            ):
+                errors.append(
+                    "{} material condition modifiers require an axis-capable controlled feature; {} is {}.".format(
+                        obj.Name,
+                        obj.ControlledSubelement,
+                        controlled_kind["class_name"]
+                    )
+                )
 
     if getattr(obj, "ProjectedToleranceZone", False):
         try:
@@ -1456,6 +1660,73 @@ def validate_fcf(obj):
                 )
             )
 
+    if getattr(obj, "MaximumToleranceValueEnabled", False):
+        try:
+            maximum_value = float(getattr(obj, "MaximumToleranceValue", 0.0))
+        except Exception:
+            maximum_value = 0.0
+
+        if not fcf_has_modifier(obj):
+            errors.append(
+                "{} maximum tolerance value requires at least one FCF modifier, such as MMC, LMC, tangent plane, statistical tolerance, common tolerance, projected zone, or unequal disposition.".format(
+                    obj.Name
+                )
+            )
+
+        if maximum_value <= 0.0:
+            errors.append(
+                "{} maximum tolerance value must be positive.".format(
+                    obj.Name
+                )
+            )
+
+    if getattr(obj, "UnitBasisToleranceEnabled", False):
+        unit_type = str(getattr(obj, "UnitBasisType", "Length"))
+
+        try:
+            primary_unit = float(
+                getattr(obj, "UnitBasisPrimaryLength", 0.0)
+            )
+        except Exception:
+            primary_unit = 0.0
+
+        try:
+            secondary_unit = float(
+                getattr(obj, "UnitBasisSecondaryLength", 0.0)
+            )
+        except Exception:
+            secondary_unit = 0.0
+
+        if unit_type not in ("Length", "Circular", "Rectangular", "Square"):
+            errors.append(
+                "{} has unsupported unit-basis type {}.".format(
+                    obj.Name,
+                    unit_type
+                )
+            )
+
+        if primary_unit <= 0.0:
+            errors.append(
+                "{} unit-basis tolerance requires a positive primary unit size.".format(
+                    obj.Name
+                )
+            )
+
+        if unit_type == "Rectangular" and secondary_unit <= 0.0:
+            errors.append(
+                "{} unit-basis tolerance requires a positive secondary unit size.".format(
+                    obj.Name
+                )
+            )
+
+    if getattr(obj, "NonUniformToleranceZone", False):
+        if tolerance_type not in ("Profile", "LineProfile"):
+            errors.append(
+                "{} non-uniform tolerance zones are currently supported only on profile tolerances.".format(
+                    obj.Name
+                )
+            )
+
     if tolerance_type == "Position" and obj.DatumSystem is None:
 
         errors.append(
@@ -1486,6 +1757,19 @@ def validate_fcf(obj):
                 obj.Name
             )
         )
+
+    if tolerance_type in ("CircularRunout", "TotalRunout"):
+        try:
+            runout_angle = float(getattr(obj, "RunoutOrientationAngle", 0.0))
+        except Exception:
+            runout_angle = 0.0
+
+        if not math.isfinite(runout_angle):
+            errors.append(
+                "{} runout orientation angle must be finite.".format(
+                    obj.Name
+                )
+            )
 
     profile_all_over = (
         tolerance_type == "Profile"
@@ -1530,46 +1814,15 @@ def validate_fcf(obj):
 
     if obj.ControlledObject and obj.ControlledSubelement:
 
-        try:
-
-            shape = obj.ControlledObject.Shape
-
-            valid_names = []
-
-            valid_names.extend(
-                ["Face{}".format(i + 1)
-                 for i in range(len(shape.Faces))]
-            )
-
-            valid_names.extend(
-                ["Edge{}".format(i + 1)
-                 for i in range(len(shape.Edges))]
-            )
-
-            valid_names.extend(
-                ["Vertex{}".format(i + 1)
-                 for i in range(len(shape.Vertexes))]
-            )
-
-            if obj.ControlledSubelement not in valid_names:
-
-                errors.append(
-                    "{} references missing subelement {}.".format(
-                        obj.Name,
-                        obj.ControlledSubelement
-                    )
-                )
-
-        except Exception as e:
-
+        if not subelement_exists(obj.ControlledObject, obj.ControlledSubelement):
             errors.append(
-                "{} geometry validation failed: {}".format(
+                "{} references missing subelement {}.".format(
                     obj.Name,
-                    str(e)
+                    obj.ControlledSubelement
                 )
             )
 
-    errors.extend(validate_fcf_rule_set(obj))
+    errors.extend(validate_fcf_rule_set(obj, geometry_cache))
 
     return errors
 
@@ -1596,7 +1849,8 @@ def validate_document(doc):
                 obj.Name,
                 obj.DatumLabel,
                 obj.ReferencedObject.Name if obj.ReferencedObject else "<none>",
-                obj.ReferencedSubelement
+                ", ".join(datum_referenced_subelements(obj))
+                    or obj.ReferencedSubelement
             )
         )
 

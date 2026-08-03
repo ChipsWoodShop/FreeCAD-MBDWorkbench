@@ -2,8 +2,8 @@
 
 import FreeCAD
 
-from MBDPMI import ensure_global_link_property, ensure_pmi_identity
-from MBDViewProvider import ViewProviderSingleItemFCF
+from .MBDPMI import ensure_global_link_property, ensure_pmi_identity
+from .MBDViewProvider import ViewProviderSingleItemFCF
 
 
 def add_property_if_missing(obj, prop_type, name, group, description):
@@ -116,6 +116,93 @@ class MBDFeatureControlFrame:
             "Unequally disposed profile offset"
         )
 
+        add_property_if_missing(
+            obj,
+            "App::PropertyBool",
+            "TangentPlaneModifier",
+            "MBD_FCF",
+            "Include tangent plane modifier"
+        )
+        obj.TangentPlaneModifier = False
+
+        add_property_if_missing(
+            obj,
+            "App::PropertyBool",
+            "StatisticalToleranceModifier",
+            "MBD_FCF",
+            "Include statistical tolerance modifier"
+        )
+        obj.StatisticalToleranceModifier = False
+
+        add_property_if_missing(
+            obj,
+            "App::PropertyBool",
+            "CommonZoneModifier",
+            "MBD_FCF",
+            "Include common zone modifier"
+        )
+        obj.CommonZoneModifier = False
+
+        add_property_if_missing(
+            obj,
+            "App::PropertyBool",
+            "MaximumToleranceValueEnabled",
+            "MBD_FCF",
+            "Include maximum tolerance value"
+        )
+        obj.MaximumToleranceValueEnabled = False
+
+        add_property_if_missing(
+            obj,
+            "App::PropertyLength",
+            "MaximumToleranceValue",
+            "MBD_FCF",
+            "Maximum tolerance value"
+        )
+
+        add_property_if_missing(
+            obj,
+            "App::PropertyBool",
+            "UnitBasisToleranceEnabled",
+            "MBD_FCF",
+            "Include unit-basis tolerance"
+        )
+        obj.UnitBasisToleranceEnabled = False
+
+        add_property_if_missing(
+            obj,
+            "App::PropertyEnumeration",
+            "UnitBasisType",
+            "MBD_FCF",
+            "Unit-basis tolerance area type"
+        )
+        obj.UnitBasisType = ["Length", "Circular", "Square", "Rectangular"]
+
+        add_property_if_missing(
+            obj,
+            "App::PropertyLength",
+            "UnitBasisPrimaryLength",
+            "MBD_FCF",
+            "Unit-basis primary length"
+        )
+
+        add_property_if_missing(
+            obj,
+            "App::PropertyLength",
+            "UnitBasisSecondaryLength",
+            "MBD_FCF",
+            "Unit-basis secondary length"
+        )
+
+        add_property_if_missing(
+            obj,
+            "App::PropertyBool",
+            "NonUniformToleranceZone",
+            "MBD_FCF",
+            "Include non-uniform tolerance zone"
+        )
+        obj.NonUniformToleranceZone = False
+
         obj.addProperty(
             "App::PropertyLink",
             "DatumSystem",
@@ -142,6 +229,52 @@ class MBDFeatureControlFrame:
             "ControlledSubelement",
             "MBD_FCF",
             "Controlled subelement"
+        )
+
+        add_property_if_missing(
+            obj,
+            "App::PropertyStringList",
+            "ControlledSubelementList",
+            "MBD_FCF",
+            "All controlled subelements for imported multi-geometry tolerances"
+        )
+
+        ensure_global_link_property(
+            obj,
+            "ProfileDirectionObject",
+            "MBD_FCF",
+            "Optional section/direction line for profile of a line"
+        )
+
+        add_property_if_missing(
+            obj,
+            "App::PropertyString",
+            "ProfileDirectionSubelement",
+            "MBD_FCF",
+            "Optional section/direction subelement for profile of a line"
+        )
+
+        ensure_global_link_property(
+            obj,
+            "AffectedPlaneObject",
+            "MBD_FCF",
+            "Datum line or line element defining the affected plane"
+        )
+
+        add_property_if_missing(
+            obj,
+            "App::PropertyString",
+            "AffectedPlaneSubelement",
+            "MBD_FCF",
+            "Subelement defining the affected plane line"
+        )
+
+        add_property_if_missing(
+            obj,
+            "App::PropertyAngle",
+            "RunoutOrientationAngle",
+            "MBD_FCF",
+            "Runout zone orientation angle"
         )
         
         ensure_global_link_property(
@@ -223,26 +356,6 @@ class MBDFeatureControlFrame:
             "Whether current referenced geometry matches stored signature"
         )
         obj.GeometrySignatureValid = True
-        obj.addProperty(
-            "App::PropertyLink",
-            "DisplayFrame",
-            "MBD_FCF",
-            "Optional visible feature control frame helper"
-        )
-
-        obj.addProperty(
-            "App::PropertyLink",
-            "DisplayText",
-            "MBD_FCF",
-            "Optional visible feature control frame text helper"
-        )
-
-        obj.addProperty(
-            "App::PropertyLink",
-            "DisplayLeader",
-            "MBD_FCF",
-            "Optional visible feature control frame leader helper"
-        )
         ensure_pmi_identity(obj, "fcf-created")
     def execute(self, obj):
         pass

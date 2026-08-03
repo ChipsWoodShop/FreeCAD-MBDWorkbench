@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<package format="1" xmlns="https://wiki.freecad.org/Package_Metadata">
+  <name>MBDWorkbench</name>
+  <version>0.1.0</version>
+  <date>2026-08-02</date>
+  <description>Model-Based Definition workbench for semantic PMI authoring, validation, AP242 STEP export, and first-pass AP242 semantic PMI import.</description>
+  <maintainer email="Chip@chipswoodshop.com">Chip</maintainer>
+  <license file="LICENSE">LGPL-2.1-only</license>
+  <url type="repository" branch="main">https://github.com/ChipsWoodShop/FreeCAD-MBDWorkbench</url>
+  <url type="readme">https://github.com/ChipsWoodShop/FreeCAD-MBDWorkbench/blob/main/README.md</url>
+  <url type="bugtracker">https://github.com/ChipsWoodShop/FreeCAD-MBDWorkbench/issues</url>
+  <icon>freecad/mbd_workbench/mbd_command_icons/create_datum_feature.svg</icon>
+  <freecadmin>1.1.0</freecadmin>
+  <pythonmin>3.11</pythonmin>
+  <tag>MBD</tag>
+  <tag>PMI</tag>
+  <tag>GD&amp;T</tag>
+  <tag>AP242</tag>
+  <tag>STEP</tag>
+  <tag>manufacturing</tag>
+  <content>
+    <workbench>
+      <name>MBD</name>
+      <version>0.1.0</version>
+      <description>Tools for FreeCAD semantic PMI, GD&amp;T annotations, validation, and AP242 STEP exchange.</description>
+      <subdirectory>freecad/mbd_workbench</subdirectory>
+      <classname>MBDWorkbench</classname>
+      <icon>freecad/mbd_workbench/mbd_command_icons/create_datum_feature.svg</icon>
+    </workbench>
+  </content>
+</package>

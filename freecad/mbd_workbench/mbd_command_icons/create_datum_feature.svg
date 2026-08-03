@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg
+   viewBox="0 0 64 64"
+   version="1.1"
+   id="svg10"
+   sodipodi:docname="create_datum_feature.svg"
+   inkscape:version="1.2.2 (b0a8486541, 2022-12-01)"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+  <defs
+     id="defs14" />
+  <sodipodi:namedview
+     id="namedview12"
+     pagecolor="#ffffff"
+     bordercolor="#666666"
+     borderopacity="1.0"
+     inkscape:showpageshadow="2"
+     inkscape:pageopacity="0.0"
+     inkscape:pagecheckerboard="0"
+     inkscape:deskcolor="#d1d1d1"
+     showgrid="false"
+     inkscape:zoom="12.5625"
+     inkscape:cx="18.189055"
+     inkscape:cy="32.039801"
+     inkscape:window-width="1680"
+     inkscape:window-height="1002"
+     inkscape:window-x="0"
+     inkscape:window-y="25"
+     inkscape:window-maximized="1"
+     inkscape:current-layer="svg10" />
+  <rect
+     width="64"
+     height="64"
+     rx="10"
+     fill="#f7fbff"
+     id="rect2" />
+  <path
+     d="m 32,42.780048 9.362168,15.915686 H 22.637832 Z"
+     fill="#5fa8e8"
+     stroke="#0b4f8a"
+     stroke-width="2.34054"
+     stroke-linejoin="round"
+     id="path4"
+     style="fill:#0b4f8a;fill-opacity:1;stroke-width:5;stroke-dasharray:none" />
+  <text
+     x="32.017578"
+     y="25.726496"
+     text-anchor="middle"
+     font-family="Arial, sans-serif"
+     font-weight="700"
+     font-size="24px"
+     fill="#083b6f"
+     id="text6">A</text>
+  <path
+     d="m 32,29.960374 v 14"
+     stroke="#0b4f8a"
+     stroke-width="5"
+     stroke-linecap="round"
+     id="path8" />
+  <rect
+     style="fill:none;fill-opacity:1;stroke:#0b4f8a;stroke-width:5.3372;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:none;stroke-opacity:1"
+     id="rect1000"
+     width="27.161976"
+     height="24.969551"
+     x="18.419012"
+     y="5.140624" />
+</svg>

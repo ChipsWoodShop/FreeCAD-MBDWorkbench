@@ -6,9 +6,13 @@ import math
 import FreeCAD
 import Part
 
-import MBDBasicDimension
-from MBDPMI import ensure_global_link_property, ensure_pmi_identity
-from MBDViewProvider import ViewProviderSingleItemDimension
+from . import MBDBasicDimension
+from .MBDPMI import (
+    ensure_global_link_property,
+    ensure_pmi_identity,
+    format_length_for_annotation,
+)
+from .MBDViewProvider import ViewProviderSingleItemDimension
 
 
 DIMENSION_PURPOSES = [
@@ -281,6 +285,17 @@ def measured_value_from_references(obj):
     if str(obj.DimensionKind) not in SUPPORTED_DIMENSION_KINDS:
         return None
 
+    size_result = lightweight_size_measurement_from_references(
+        obj.DimensionKind,
+        obj.ReferenceObject1,
+        obj.ReferenceSubelement1
+    )
+
+    if size_result.get("value") is not None:
+        obj.ReferencePattern = size_result.get("pattern", "")
+        obj.ValidationMessage = size_result.get("message", "")
+        return size_result.get("value")
+
     result = measurement_from_references(
         obj.DimensionKind,
         obj.MeasurementType,
@@ -316,6 +331,63 @@ def empty_measurement(message):
         "point2": None,
         "pattern": "",
         "message": message,
+    }
+
+
+def lightweight_size_measurement_from_references(dimension_kind, ref_obj, ref_sub):
+    dimension_kind = str(dimension_kind)
+
+    if dimension_kind not in ("Diameter", "Radius"):
+        return empty_measurement("")
+
+    cylinder = lightweight_cylindrical_face_reference(ref_obj, ref_sub)
+
+    if cylinder is None:
+        return empty_measurement(
+            "{} dimensions require a cylindrical face reference.".format(
+                dimension_kind
+            )
+        )
+
+    if dimension_kind == "Diameter":
+        value = cylinder["radius"] * 2.0
+        pattern = "CylinderDiameter"
+    else:
+        value = cylinder["radius"]
+        pattern = "CylinderRadius"
+
+    return good_measurement(value, None, None, pattern)
+
+
+def lightweight_cylindrical_face_reference(obj, subelement=""):
+    shape = shape_element(obj, subelement)
+
+    if shape is None or not hasattr(shape, "Surface"):
+        return None
+
+    try:
+        surface_name = shape.Surface.__class__.__name__.lower()
+    except Exception:
+        surface_name = ""
+
+    if "cylinder" not in surface_name:
+        return None
+
+    try:
+        axis = FreeCAD.Vector(shape.Surface.Axis)
+        radius = float(shape.Surface.Radius)
+    except Exception:
+        return None
+
+    if axis.Length == 0 or radius <= 0:
+        return None
+
+    axis.normalize()
+
+    return {
+        "shape": shape,
+        "direction": axis,
+        "radius": radius,
     }
 
 
@@ -1399,10 +1471,7 @@ def dimension_display_label(obj):
         prefix = "R "
 
     def value_text(value):
-        return FreeCAD.Units.Quantity(
-            value,
-            FreeCAD.Units.Length
-        ).UserString
+        return format_length_for_annotation(value)
 
     if dimension_kind == "Angular":
         def value_text(value):

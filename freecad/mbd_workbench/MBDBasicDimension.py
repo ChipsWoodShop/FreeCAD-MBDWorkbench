@@ -5,8 +5,8 @@ import json
 import FreeCAD
 import Part
 
-from MBDPMI import ensure_pmi_identity
-from MBDViewProvider import ViewProviderSingleItemDimension
+from .MBDPMI import ensure_pmi_identity
+from .MBDViewProvider import ViewProviderSingleItemDimension
 
 
 def add_property_if_missing(obj, prop_type, name, group, description):

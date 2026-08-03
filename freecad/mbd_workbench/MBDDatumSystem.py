@@ -2,7 +2,7 @@
 
 import FreeCAD
 
-from MBDPMI import ensure_pmi_identity
+from .MBDPMI import ensure_pmi_identity
 
 
 DATUM_COMPARTMENT_PROPERTIES = (
@@ -91,10 +91,6 @@ class MBDDatumSystem:
     def __init__(self, obj):
 
         obj.Proxy = self
-
-        for old_prop in ("PrimaryDatum", "SecondaryDatum", "TertiaryDatum"):
-            if hasattr(obj, old_prop):
-                obj.removeProperty(old_prop)
 
         for prop_name, role_name in DATUM_COMPARTMENT_PROPERTIES:
             if not hasattr(obj, prop_name):

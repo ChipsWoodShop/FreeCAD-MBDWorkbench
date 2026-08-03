@@ -1,7 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <rect width="64" height="64" rx="10" fill="#f7fbff"/>
-  <rect x="17" y="18" width="30" height="24" fill="#9ecae1" stroke="#0b4f8a" stroke-width="4"/>
-  <path d="M12 52 H52 M12 46 V58 M52 46 V58" stroke="#1f2933" stroke-width="4" stroke-linecap="round"/>
-  <path d="M18 52 L12 52 L18 48 M46 52 L52 52 L46 48" fill="none" stroke="#f28c00" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
-  <text x="32" y="57" text-anchor="middle" font-family="Arial, sans-serif" font-weight="700" font-size="10" fill="#1f2933">DIM</text>
-</svg>

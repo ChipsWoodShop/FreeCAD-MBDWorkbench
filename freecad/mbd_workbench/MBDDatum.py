@@ -3,12 +3,12 @@
 import FreeCAD
 import json
 
-from MBDPMI import (
+from .MBDPMI import (
     ensure_global_link_property,
     ensure_pmi_display_layout,
     ensure_pmi_identity,
 )
-from MBDViewProvider import ViewProviderSingleItemDatumFeature
+from .MBDViewProvider import ViewProviderSingleItemDatumFeature
 
 class MBDDatumFeature:
     """
@@ -44,6 +44,13 @@ class MBDDatumFeature:
         )
 
         obj.addProperty(
+            "App::PropertyStringList",
+            "ReferencedSubelementList",
+            "MBD",
+            "All referenced subelements for imported multi-face datum features"
+        )
+
+        obj.addProperty(
             "App::PropertyEnumeration",
             "DatumType",
             "MBD",
@@ -67,34 +74,6 @@ class MBDDatumFeature:
         )
         obj.IsSemanticPMI = True
 
-        obj.addProperty(
-            "App::PropertyLink",
-            "DisplayText",
-            "MBD",
-            "Optional visible datum label text helper"
-        )
-
-        obj.addProperty(
-            "App::PropertyLink",
-            "DisplayFrame",
-            "MBD",
-            "Optional visible datum label frame helper"
-        )
-
-        obj.addProperty(
-            "App::PropertyLink",
-            "DisplayMarker",
-            "MBD",
-            "Optional visible datum triangle marker helper"
-        )
-
-        obj.addProperty(
-            "App::PropertyLink",
-            "DisplayLeader",
-            "MBD",
-            "Optional visible datum leader helper"
-        )
-        
         obj.addProperty(
             "App::PropertyVector",
             "CenterOfMass",
@@ -152,32 +131,22 @@ class MBDDatumFeature:
 class ViewProviderMBDDatumFeature(ViewProviderSingleItemDatumFeature):
     pass
 
-def update_geometry_signature(obj):
-
-    if not obj.ReferencedObject:
-        return
-
-    shape = obj.ReferencedObject.Shape
-    sub = obj.ReferencedSubelement
-
-    target = None
+def geometry_signature_for_subelement(ref_obj, sub):
+    if ref_obj is None or not sub:
+        return None
 
     try:
-        target = shape.getElement(sub)
+        target = ref_obj.Shape.getElement(sub)
     except Exception:
-        target = None
-
-    if target is None:
-        return
+        return None
 
     signature = {
-        "ReferencedObjectName": obj.ReferencedObject.Name,
+        "ReferencedObjectName": ref_obj.Name,
         "ReferencedSubelement": sub,
         "GeometryType": "Unknown",
     }
 
     try:
-        obj.CenterOfMass = target.CenterOfMass
         signature["CenterOfMass"] = [
             round(target.CenterOfMass.x, 6),
             round(target.CenterOfMass.y, 6),
@@ -187,33 +156,94 @@ def update_geometry_signature(obj):
         pass
 
     try:
-        obj.Area = target.Area
         signature["Area"] = round(target.Area, 6)
     except Exception:
         pass
 
     try:
         if sub.startswith("Face"):
-            obj.FacePerimeter = target.Length
             signature["FacePerimeter"] = round(target.Length, 6)
         elif sub.startswith("Edge"):
-            obj.EdgeLength = target.Length
             signature["EdgeLength"] = round(target.Length, 6)
     except Exception:
         pass
 
     try:
-        surf = target.Surface
-        obj.GeometryType = surf.__class__.__name__
-        signature["GeometryType"] = obj.GeometryType
+        signature["GeometryType"] = target.Surface.__class__.__name__
     except Exception:
         try:
-            curve = target.Curve
-            obj.GeometryType = curve.__class__.__name__
-            signature["GeometryType"] = obj.GeometryType
+            signature["GeometryType"] = target.Curve.__class__.__name__
         except Exception:
-            obj.GeometryType = "Unknown"
-            signature["GeometryType"] = "Unknown"
+            pass
+
+    return signature
+
+
+def update_geometry_signature(obj):
+
+    if not obj.ReferencedObject:
+        return
+
+    sub = obj.ReferencedSubelement
+    signature = geometry_signature_for_subelement(obj.ReferencedObject, sub)
+
+    if signature is None:
+        return
+
+    try:
+        target = obj.ReferencedObject.Shape.getElement(sub)
+    except Exception:
+        target = None
+
+    try:
+        if target is not None:
+            obj.CenterOfMass = target.CenterOfMass
+    except Exception:
+        pass
+
+    try:
+        if target is not None:
+            obj.Area = target.Area
+    except Exception:
+        pass
+
+    try:
+        if target is not None:
+            if sub.startswith("Face"):
+                obj.FacePerimeter = target.Length
+            elif sub.startswith("Edge"):
+                obj.EdgeLength = target.Length
+    except Exception:
+        pass
+
+    try:
+        obj.GeometryType = signature["GeometryType"]
+    except Exception:
+        pass
+
+    referenced_subelements = [
+        str(item)
+        for item in getattr(obj, "ReferencedSubelementList", [])
+        if str(item)
+    ]
+
+    if sub and sub not in referenced_subelements:
+        referenced_subelements.insert(0, sub)
+
+    if len(referenced_subelements) > 1:
+        signatures = []
+
+        for referenced_sub in referenced_subelements:
+            sub_signature = geometry_signature_for_subelement(
+                obj.ReferencedObject,
+                referenced_sub
+            )
+
+            if sub_signature is not None:
+                signatures.append(sub_signature)
+
+        if signatures:
+            signature["ReferencedSubelements"] = signatures
 
     try:
         obj.GeometrySignature = json.dumps(signature, sort_keys=True)

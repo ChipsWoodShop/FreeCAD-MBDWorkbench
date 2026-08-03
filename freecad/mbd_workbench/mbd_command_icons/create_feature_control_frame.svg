@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg
+   viewBox="0 0 64 64"
+   version="1.1"
+   id="svg16"
+   sodipodi:docname="create_feature_control_frame.svg"
+   inkscape:version="1.2.2 (b0a8486541, 2022-12-01)"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+  <defs
+     id="defs20" />
+  <sodipodi:namedview
+     id="namedview18"
+     pagecolor="#ffffff"
+     bordercolor="#666666"
+     borderopacity="1.0"
+     inkscape:showpageshadow="2"
+     inkscape:pageopacity="0.0"
+     inkscape:pagecheckerboard="0"
+     inkscape:deskcolor="#d1d1d1"
+     showgrid="false"
+     inkscape:zoom="6.28125"
+     inkscape:cx="-1.1940299"
+     inkscape:cy="53.412935"
+     inkscape:window-width="1680"
+     inkscape:window-height="1002"
+     inkscape:window-x="0"
+     inkscape:window-y="25"
+     inkscape:window-maximized="1"
+     inkscape:current-layer="svg16" />
+  <rect
+     width="64"
+     height="64"
+     rx="10"
+     fill="#fffaf2"
+     id="rect2" />
+  <rect
+     x="7"
+     y="24"
+     width="50"
+     height="18"
+     fill="#fff"
+     stroke="#1f2933"
+     stroke-width="4"
+     id="rect4" />
+  <path
+     d="M23 24 V42 M42 24 V42"
+     stroke="#1f2933"
+     stroke-width="3"
+     id="path6" />
+  <path
+     d="m 15.287201,27.012333 v 12.065926 m -5.271796,-6.032963 h 10.54359"
+     stroke="#1f2933"
+     stroke-width="1.91567"
+     stroke-linecap="round"
+     id="path8" />
+  <text
+     x="33"
+     y="37"
+     text-anchor="middle"
+     font-family="Arial, sans-serif"
+     font-weight="700"
+     font-size="12"
+     fill="#1f2933"
+     id="text10">⌀.1</text>
+  <text
+     x="50"
+     y="37"
+     text-anchor="middle"
+     font-family="Arial, sans-serif"
+     font-weight="700"
+     font-size="12"
+     fill="#1f2933"
+     id="text12">A</text>
+  <circle
+     style="fill:none;stroke:#0b4f8a;stroke-width:0.701061;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:none"
+     id="path355"
+     cx="15.2872"
+     cy="33.045296"
+     r="4.6494694" />
+</svg>

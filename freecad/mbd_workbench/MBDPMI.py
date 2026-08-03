@@ -4,15 +4,6 @@ import json
 import uuid
 
 
-GLOBAL_GEOMETRY_LINK_PROPERTIES = {
-    "ReferencedObject",
-    "ControlledObject",
-    "ConstructionObject",
-    "ReferenceObject1",
-    "ReferenceObject2",
-}
-
-
 def _add_property_if_missing(obj, prop_type, name, group, description):
     if hasattr(obj, name):
         return False
@@ -70,39 +61,28 @@ def ensure_global_link_property(obj, name, group, description):
     return True
 
 
-def migrate_semantic_pmi_global_links(doc):
-    migrated = []
+def strip_quantity_unit_suffix(text):
+    """Return a displayed quantity without the trailing unit designator."""
+    parts = str(text).replace("\xa0", " ").strip().split()
 
-    if doc is None:
-        return migrated
+    if len(parts) < 2:
+        return str(text).strip()
 
-    for obj in doc.Objects:
-        if not getattr(obj, "IsSemanticPMI", False):
-            continue
+    unit = parts[-1]
 
-        for name in GLOBAL_GEOMETRY_LINK_PROPERTIES:
-            if not hasattr(obj, name):
-                continue
+    if any(char.isalpha() or char in "°µ" for char in unit):
+        return " ".join(parts[:-1])
 
-            try:
-                group = obj.getGroupOfProperty(name)
-            except Exception:
-                group = "MBD"
+    return str(text).strip()
 
-            try:
-                description = obj.getDocumentationOfProperty(name)
-            except Exception:
-                description = "Referenced model geometry"
 
-            if ensure_global_link_property(
-                obj,
-                name,
-                group or "MBD",
-                description or "Referenced model geometry"
-            ):
-                migrated.append("{}.{}".format(obj.Name, name))
+def format_length_for_annotation(value):
+    """Format a model-space length for ASME-style annotation display."""
+    import FreeCAD
 
-    return migrated
+    return strip_quantity_unit_suffix(
+        FreeCAD.Units.Quantity(value, FreeCAD.Units.Length).UserString
+    )
 
 
 def ensure_pmi_display_layout(obj):
@@ -219,6 +199,51 @@ def ensure_pmi_identity(obj, event="created"):
         append_pmi_history(obj, event)
 
     ensure_pmi_display_layout(obj)
+
+
+def ensure_pmi_import_metadata(obj):
+    _add_property_if_missing(
+        obj,
+        "App::PropertyString",
+        "AP242SourceFile",
+        "MBD_Import",
+        "AP242 STEP file used to create this PMI object"
+    )
+    _add_property_if_missing(
+        obj,
+        "App::PropertyString",
+        "AP242SourceId",
+        "MBD_Import",
+        "Source AP242 STEP entity id for this PMI object"
+    )
+    _add_property_if_missing(
+        obj,
+        "App::PropertyString",
+        "AP242SourceType",
+        "MBD_Import",
+        "Source AP242 STEP entity type for this PMI object"
+    )
+    _add_property_if_missing(
+        obj,
+        "App::PropertyString",
+        "AP242ImportStatus",
+        "MBD_Import",
+        "Native import status for this PMI object"
+    )
+
+
+def set_pmi_import_metadata(
+    obj,
+    source_file="",
+    source_id="",
+    source_type="",
+    import_status="Native"
+):
+    ensure_pmi_import_metadata(obj)
+    obj.AP242SourceFile = str(source_file or "")
+    obj.AP242SourceId = str(source_id or "")
+    obj.AP242SourceType = str(source_type or "")
+    obj.AP242ImportStatus = str(import_status or "")
 
 
 def append_pmi_history(obj, event):

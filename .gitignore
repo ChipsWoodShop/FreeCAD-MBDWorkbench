@@ -6,3 +6,25 @@ __pycache__/
 *.FCStd1
 *.FCStd~
 .vscode/
+
+# Local/reference documents that should not ship with the addon package.
+*.pdf
+*.mhtml
+
+# FreeCAD/generated CAD and STEP artifacts.
+*.FCStd
+*.FCBak
+*.step
+*.stp
+
+# Local screenshots and image-editing artifacts.
+*.png
+*.xcf
+
+# Keep Python tests tracked, but ignore generated test data/artifacts.
+tests/*.FCStd
+tests/*.FCBak
+tests/*.step
+tests/*.stp
+tests/*.png
+tests/*.xcf

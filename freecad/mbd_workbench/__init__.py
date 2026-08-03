@@ -1,0 +1,1 @@
+"""FreeCAD MBD Workbench package."""

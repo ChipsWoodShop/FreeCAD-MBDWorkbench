@@ -1,12 +1,14 @@
 import math
+import time
 
 import FreeCAD
 import FreeCADGui
+import Part
 from pivy import coin
 from PySide import QtCore, QtGui
 
-from MBDDatumSystem import datum_compartment_label, datum_system_compartments
-from MBDPMI import ensure_pmi_display_layout
+from .MBDDatumSystem import datum_compartment_label, datum_system_compartments
+from .MBDPMI import ensure_pmi_display_layout, format_length_for_annotation
 
 
 TEXT_WIDTH_FACTOR = 0.62
@@ -177,6 +179,10 @@ def symbol_segments(symbol_name):
         line(0.30, 0.72, 0.30, 0.38)
         arc(0.50, 0.38, 0.20, 0.16, 180, 360)
         line(0.70, 0.38, 0.70, 0.72)
+    elif symbol_name == "Modifier T":
+        circle(0.50, 0.50, 0.34)
+        line(0.28, 0.72, 0.72, 0.72)
+        line(0.50, 0.72, 0.50, 0.28)
 
     return segments
 
@@ -199,10 +205,7 @@ def fcf_symbol_name(tolerance_type):
 
 
 def fcf_cells(obj):
-    tolerance = FreeCAD.Units.Quantity(
-        obj.ToleranceValue,
-        FreeCAD.Units.Length
-    ).UserString
+    tolerance = format_length_for_annotation(obj.ToleranceValue)
     tolerance_parts = []
 
     if getattr(obj, "DiameterZone", False):
@@ -220,25 +223,67 @@ def fcf_cells(obj):
         tolerance_parts.append(("symbol", "Modifier L"))
 
     if getattr(obj, "ProjectedToleranceZone", False):
-        projected_height = FreeCAD.Units.Quantity(
+        projected_height = format_length_for_annotation(
             getattr(obj, "ProjectedToleranceHeight", 0.0),
-            FreeCAD.Units.Length
-        ).UserString
+        )
         tolerance_parts.append(("symbol", "Modifier P"))
         tolerance_parts.append(("text", projected_height))
 
     if getattr(obj, "UnequallyDisposedZone", False):
-        offset = FreeCAD.Units.Quantity(
+        offset = format_length_for_annotation(
             getattr(obj, "UnequallyDisposedOffset", 0.0),
-            FreeCAD.Units.Length
-        ).UserString
+        )
         tolerance_parts.append(("symbol", "Modifier U"))
         tolerance_parts.append(("text", offset))
+
+    if getattr(obj, "TangentPlaneModifier", False):
+        tolerance_parts.append(("symbol", "Modifier T"))
+
+    if getattr(obj, "StatisticalToleranceModifier", False):
+        tolerance_parts.append(("text", "<ST>"))
+
+    if getattr(obj, "CommonZoneModifier", False):
+        tolerance_parts.append(("text", "CT"))
+
+    if getattr(obj, "UnitBasisToleranceEnabled", False):
+        unit_type = str(getattr(obj, "UnitBasisType", "Length"))
+        primary = format_length_for_annotation(
+            getattr(obj, "UnitBasisPrimaryLength", 0.0),
+        )
+
+        if unit_type == "Length":
+            tolerance_parts.append(("text", "/ {}".format(primary)))
+        elif unit_type == "Circular":
+            tolerance_parts.append(("text", "/"))
+            tolerance_parts.append(("symbol", "Diameter"))
+            tolerance_parts.append(("text", primary))
+        elif unit_type == "Square":
+            tolerance_parts.append(("text", "/ {} x {}".format(
+                primary,
+                primary
+            )))
+        else:
+            secondary = format_length_for_annotation(
+                getattr(obj, "UnitBasisSecondaryLength", 0.0),
+            )
+            tolerance_parts.append(("text", "/ {} x {}".format(
+                primary,
+                secondary
+            )))
+
+    if getattr(obj, "NonUniformToleranceZone", False):
+        tolerance_parts.append(("text", "NON-UNIFORM"))
 
     cells = [
         ("symbol", fcf_symbol_name(obj.ToleranceType)),
         ("tolerance", tolerance_parts),
     ]
+
+    if getattr(obj, "MaximumToleranceValueEnabled", False):
+        maximum_value = format_length_for_annotation(
+            getattr(obj, "MaximumToleranceValue", 0.0),
+        )
+        cells.append(("text", "{} MAX".format(maximum_value)))
 
     if (
         str(obj.ToleranceType) == "Profile"
@@ -271,7 +316,7 @@ def fcf_attachment_point(obj):
         and subelement
     ):
         try:
-            from MBDDimension import cylindrical_face_reference
+            from .MBDDimension import cylindrical_face_reference
 
             cylinder = cylindrical_face_reference(controlled, subelement)
 
@@ -279,6 +324,25 @@ def fcf_attachment_point(obj):
                 return cylinder["point"]
         except Exception:
             pass
+
+    if str(getattr(obj, "ToleranceType", "")) in (
+        "CircularRunout",
+        "TotalRunout",
+    ):
+        axis_reference = revolved_surface_axis_reference(controlled, subelement)
+
+        if axis_reference is not None:
+            origin = FreeCAD.Vector(
+                getattr(obj, "AnnotationOrigin", FreeCAD.Vector(0, 0, 0))
+            )
+            surface_point = runout_surface_attachment_point(
+                axis_reference,
+                origin,
+                None
+            )
+
+            if surface_point is not None:
+                return surface_point
 
     if subelement:
         try:
@@ -288,7 +352,7 @@ def fcf_attachment_point(obj):
             return None
 
     try:
-        from MBDDimension import nearest_point_on_shape
+        from .MBDDimension import nearest_point_on_shape
 
         bbox = controlled.Shape.BoundBox
         preferred_point = FreeCAD.Vector(
@@ -316,8 +380,13 @@ def fcf_tolerance_part_width(part, height):
     if kind == "symbol":
         return height * FCF_TOLERANCE_SYMBOL_WIDTH_FACTOR
 
+    width_factor = FCF_TOLERANCE_TEXT_WIDTH_FACTOR
+
+    if len(str(value)) > 8:
+        width_factor = 0.50
+
     return max(
-        len(str(value)) * height * FCF_TOLERANCE_TEXT_WIDTH_FACTOR,
+        len(str(value)) * height * width_factor,
         height * 0.6
     )
 
@@ -379,7 +448,8 @@ def fcf_leader_segments(obj, attachment, origin, height):
                     and getattr(candidate, subelement_property, "")
                     == getattr(obj, "ControlledSubelement", "")
                 ):
-                    return []
+                    if str(getattr(obj, "ToleranceType", "")) == "Position":
+                        return []
     except Exception:
         pass
 
@@ -392,7 +462,7 @@ def fcf_leader_segments(obj, attachment, origin, height):
     subelement = getattr(obj, "ControlledSubelement", "")
 
     try:
-        from MBDDimension import cylindrical_face_reference
+        from .MBDDimension import cylindrical_face_reference
 
         cylinder = cylindrical_face_reference(controlled, subelement)
         opening_direction = cylinder.get("opening_direction")
@@ -420,6 +490,849 @@ def fcf_leader_segments(obj, attachment, origin, height):
     return leader_segments
 
 
+def revolved_surface_axis_reference(obj, subelement):
+    if obj is None:
+        return None
+
+    try:
+        shape = obj.Shape.getElement(subelement) if subelement else obj.Shape
+    except Exception:
+        return None
+
+    if shape is None:
+        return None
+
+    candidates = []
+
+    if hasattr(shape, "Surface"):
+        candidates.append(shape)
+    else:
+        try:
+            candidates.extend(list(shape.Faces))
+        except Exception:
+            pass
+
+    for candidate in candidates:
+        surface = getattr(candidate, "Surface", None)
+
+        if surface is None:
+            continue
+
+        try:
+            surface_name = surface.__class__.__name__.lower()
+        except Exception:
+            surface_name = ""
+
+        if not any(
+            token in surface_name
+            for token in ("cylinder", "cone", "torus", "sphere")
+        ):
+            continue
+
+        try:
+            axis = FreeCAD.Vector(surface.Axis)
+        except Exception:
+            continue
+
+        if axis.Length <= 1e-9:
+            continue
+
+        axis.normalize()
+        point = None
+
+        for attr in ("Center", "Position", "Apex"):
+            try:
+                point = FreeCAD.Vector(getattr(surface, attr))
+                break
+            except Exception:
+                pass
+
+        if point is None:
+            try:
+                point = FreeCAD.Vector(candidate.CenterOfMass)
+            except Exception:
+                point = FreeCAD.Vector(0, 0, 0)
+
+        try:
+            center = FreeCAD.Vector(candidate.CenterOfMass)
+            point = point + axis * ((center - point).dot(axis))
+        except Exception:
+            pass
+
+        result = {
+            "shape": candidate,
+            "point": point,
+            "direction": axis,
+        }
+
+        try:
+            result["radius"] = float(surface.Radius)
+        except Exception:
+            pass
+
+        return result
+
+    return None
+
+
+def point_distance_from_axis(point, axis_point, axis_direction):
+    vector = FreeCAD.Vector(point) - FreeCAD.Vector(axis_point)
+    radial = vector - axis_direction * vector.dot(axis_direction)
+    return radial.Length
+
+
+def estimated_revolved_radius(axis_reference):
+    try:
+        radius = float(axis_reference.get("radius", 0.0))
+
+        if radius > 1e-9:
+            return radius
+    except Exception:
+        pass
+
+    shape = axis_reference.get("shape")
+    axis_point = FreeCAD.Vector(axis_reference["point"])
+    axis_direction = FreeCAD.Vector(axis_reference["direction"])
+
+    if axis_direction.Length <= 1e-9:
+        return 0.0
+
+    axis_direction.normalize()
+    distances = []
+
+    try:
+        for vertex in shape.Vertexes:
+            distances.append(
+                point_distance_from_axis(
+                    vertex.Point,
+                    axis_point,
+                    axis_direction
+                )
+            )
+    except Exception:
+        pass
+
+    try:
+        bbox = shape.BoundBox
+
+        for x in (bbox.XMin, bbox.XMax):
+            for y in (bbox.YMin, bbox.YMax):
+                for z in (bbox.ZMin, bbox.ZMax):
+                    distances.append(
+                        point_distance_from_axis(
+                            FreeCAD.Vector(x, y, z),
+                            axis_point,
+                            axis_direction
+                        )
+                    )
+    except Exception:
+        pass
+
+    distances = [distance for distance in distances if distance > 1e-9]
+    return min(distances) if distances else 0.0
+
+
+def runout_surface_attachment_point(axis_reference, origin, fallback):
+    """Pick a real surface-side point for runout leaders.
+
+    Full cylindrical faces often report their center of mass on the axis. A
+    leader to that point reads as if it controls the axis directly, so runout
+    callouts deliberately step from the axis out to the visible surface in the
+    direction of the annotation.
+    """
+    try:
+        axis_point = FreeCAD.Vector(axis_reference["point"])
+        axis_direction = FreeCAD.Vector(axis_reference["direction"])
+
+        if axis_direction.Length <= 1e-9:
+            return fallback
+
+        axis_direction.normalize()
+        origin = FreeCAD.Vector(origin)
+        station = axis_point + axis_direction * (
+            (origin - axis_point).dot(axis_direction)
+        )
+        radial = origin - station
+        radial = radial - axis_direction * radial.dot(axis_direction)
+
+        if radial.Length <= 1e-9 and fallback is not None:
+            radial = FreeCAD.Vector(fallback) - axis_point
+            radial = radial - axis_direction * radial.dot(axis_direction)
+
+        if radial.Length <= 1e-9:
+            radial = axis_direction.cross(FreeCAD.Vector(0, 0, 1))
+
+        if radial.Length <= 1e-9:
+            radial = axis_direction.cross(FreeCAD.Vector(0, 1, 0))
+
+        if radial.Length <= 1e-9:
+            return fallback
+
+        radial.normalize()
+        radius = estimated_revolved_radius(axis_reference)
+
+        if radius <= 1e-9:
+            return fallback
+
+        return station + radial * radius
+    except Exception:
+        return fallback
+
+
+def runout_surface_attachment_point_in_plane(axis_reference, origin, normal, fallback):
+    """Choose the section point where the FCF plane meets the controlled surface."""
+    try:
+        axis_point = FreeCAD.Vector(axis_reference["point"])
+        axis_direction = FreeCAD.Vector(axis_reference["direction"])
+        origin = FreeCAD.Vector(origin)
+        normal = FreeCAD.Vector(normal)
+
+        if axis_direction.Length <= 1e-9 or normal.Length <= 1e-9:
+            return fallback
+
+        axis_direction.normalize()
+        normal.normalize()
+        station = axis_point + axis_direction * (
+            (origin - axis_point).dot(axis_direction)
+        )
+        radial = normal.cross(axis_direction)
+
+        if radial.Length <= 1e-9:
+            return runout_surface_attachment_point(axis_reference, origin, fallback)
+
+        radial.normalize()
+
+        if radial.dot(origin - station) < 0.0:
+            radial = radial.negative()
+
+        radius = estimated_revolved_radius(axis_reference)
+
+        if radius <= 1e-9:
+            return fallback
+
+        return station + radial * radius
+    except Exception:
+        return fallback
+
+
+def datum_axis_reference(datum_obj):
+    if datum_obj is None:
+        return None
+
+    referenced = getattr(datum_obj, "ReferencedObject", None)
+    subelement = getattr(datum_obj, "ReferencedSubelement", "")
+
+    if referenced is None or not subelement:
+        return None
+
+    axis_reference = revolved_surface_axis_reference(referenced, subelement)
+
+    if axis_reference is not None:
+        return axis_reference
+
+    try:
+        shape = referenced.Shape.getElement(subelement)
+
+        if hasattr(shape, "Curve"):
+            try:
+                start = shape.Vertexes[0].Point
+                end = shape.Vertexes[-1].Point
+                direction = FreeCAD.Vector(end) - FreeCAD.Vector(start)
+
+                if direction.Length > 1e-9:
+                    direction.normalize()
+                    return {
+                        "shape": shape,
+                        "point": FreeCAD.Vector(start),
+                        "direction": direction,
+                    }
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    return None
+
+
+def runout_datum_axis_reference(obj):
+    datum_reference = getattr(obj, "DatumReference", None)
+
+    if datum_reference is not None:
+        axis_reference = datum_axis_reference(datum_reference)
+
+        if axis_reference is not None:
+            return axis_reference
+
+    datum_system = getattr(obj, "DatumSystem", None)
+
+    if datum_system is not None:
+        for _role, datums in datum_system_compartments(datum_system):
+            for datum in datums:
+                axis_reference = datum_axis_reference(datum)
+
+                if axis_reference is not None:
+                    return axis_reference
+
+    return None
+
+
+def project_point_to_plane(point, plane_origin, plane_normal):
+    point = FreeCAD.Vector(point)
+    plane_origin = FreeCAD.Vector(plane_origin)
+    plane_normal = FreeCAD.Vector(plane_normal)
+
+    if plane_normal.Length <= 1e-9:
+        return point
+
+    plane_normal.normalize()
+    return point - plane_normal * ((point - plane_origin).dot(plane_normal))
+
+
+def line_intersection_in_plane(point_a, direction_a, point_b, direction_b, normal):
+    direction_a = FreeCAD.Vector(direction_a)
+    direction_b = FreeCAD.Vector(direction_b)
+    normal = FreeCAD.Vector(normal)
+
+    if (
+        direction_a.Length <= 1e-9
+        or direction_b.Length <= 1e-9
+        or normal.Length <= 1e-9
+    ):
+        return None
+
+    direction_a.normalize()
+    direction_b.normalize()
+    normal.normalize()
+    denominator = direction_a.cross(direction_b).dot(normal)
+
+    if abs(denominator) <= 1e-9:
+        return None
+
+    offset = FreeCAD.Vector(point_b) - FreeCAD.Vector(point_a)
+    parameter = offset.cross(direction_b).dot(normal) / denominator
+    return FreeCAD.Vector(point_a) + direction_a * parameter
+
+
+def shape_element_from_reference(obj, subelement):
+    try:
+        if subelement:
+            return obj.Shape.getElement(subelement)
+
+        return obj.Shape
+    except Exception:
+        return None
+
+
+def surface_point_near_plane_line(controlled, subelement, line_point, line_direction, length):
+    shape = shape_element_from_reference(controlled, subelement)
+
+    if shape is None:
+        return None, None
+
+    try:
+        direction = FreeCAD.Vector(line_direction)
+
+        if direction.Length <= 1e-9:
+            return None, None
+
+        direction.normalize()
+        line_point = FreeCAD.Vector(line_point)
+        probe = Part.makeLine(
+            line_point - direction * length,
+            line_point + direction * length
+        )
+        distance, point_pairs, _support = probe.distToShape(shape)
+
+        if distance < 0 or not point_pairs:
+            return None, None
+
+        return FreeCAD.Vector(point_pairs[0][1]), float(distance)
+    except Exception:
+        return None, None
+
+
+def nearest_controlled_surface_point_in_plane(controlled, subelement, origin, normal):
+    shape = shape_element_from_reference(controlled, subelement)
+
+    if shape is None:
+        return None
+
+    try:
+        distance, point_pairs, _support = Part.Vertex(
+            FreeCAD.Vector(origin)
+        ).distToShape(shape)
+
+        if distance < 0 or not point_pairs:
+            return None
+
+        return project_point_to_plane(point_pairs[0][1], origin, normal)
+    except Exception:
+        return None
+
+
+def runout_display_geometry(obj, attachment, origin, height, x_axis, normal):
+    """Resolve the shared datum-axis, surface leader, and arc geometry.
+
+    Runout orientation annotations have several dependent pieces: the FCF
+    leader, the controlled-surface contact point, the datum axis shown in the
+    annotation plane, and the orientation arc.  Keeping those values in one
+    helper prevents the leader from pointing at one place while the arc is
+    constructed from another.
+    """
+    if str(getattr(obj, "ToleranceType", "")) not in (
+        "CircularRunout",
+        "TotalRunout",
+    ):
+        return None
+
+    controlled = getattr(obj, "ControlledObject", None)
+    subelement = getattr(obj, "ControlledSubelement", "")
+
+    try:
+        from .MBDDimension import cylindrical_face_reference
+
+        cylinder = cylindrical_face_reference(controlled, subelement)
+
+        if cylinder is None:
+            cylinder = revolved_surface_axis_reference(controlled, subelement)
+
+        if cylinder is None:
+            return None
+
+        origin_on_plane = FreeCAD.Vector(origin)
+        normal = FreeCAD.Vector(normal)
+
+        if normal.Length <= 1e-9:
+            return None
+
+        normal.normalize()
+        base_attachment = runout_surface_attachment_point_in_plane(
+            cylinder,
+            origin_on_plane,
+            normal,
+            attachment
+        )
+        base_attachment = project_point_to_plane(
+            base_attachment,
+            origin_on_plane,
+            normal
+        )
+        datum_axis = runout_datum_axis_reference(obj)
+
+        if datum_axis is None:
+            datum_axis = cylinder
+
+        axis = FreeCAD.Vector(
+            datum_axis.get("direction", FreeCAD.Vector(0, 0, 1))
+        )
+
+        if axis.Length <= 1e-9:
+            return None
+
+        axis.normalize()
+        datum_point = FreeCAD.Vector(
+            datum_axis.get("point", base_attachment)
+        )
+        datum_point_on_plane = project_point_to_plane(
+            datum_point,
+            origin_on_plane,
+            normal
+        )
+        axis_on_plane = axis - normal * axis.dot(normal)
+
+        if axis_on_plane.Length <= 1e-9:
+            axis_on_plane = FreeCAD.Vector(x_axis)
+
+        if axis_on_plane.Length <= 1e-9:
+            return None
+
+        axis_on_plane.normalize()
+        oriented_leader = runout_leader_from_orientation_angle(
+            obj,
+            origin_on_plane,
+            datum_point_on_plane,
+            axis_on_plane,
+            normal,
+            height,
+            base_attachment
+        )
+        nearest_surface_point = nearest_controlled_surface_point_in_plane(
+            controlled,
+            subelement,
+            origin_on_plane,
+            normal
+        )
+
+        if oriented_leader is not None:
+            arc_center = oriented_leader["arc_center"]
+            attachment_on_plane = oriented_leader["surface_point"]
+            leader_to_surface = oriented_leader["leader_direction"]
+            signed_angle = oriented_leader["signed_angle"]
+        else:
+            attachment_on_plane = (
+                nearest_surface_point
+                if nearest_surface_point is not None
+                else base_attachment
+            )
+            leader_on_plane = attachment_on_plane - origin_on_plane
+
+            if leader_on_plane.Length <= 1e-9:
+                return None
+
+            leader_on_plane.normalize()
+            arc_center = line_intersection_in_plane(
+                origin_on_plane,
+                leader_on_plane,
+                datum_point_on_plane,
+                axis_on_plane,
+                normal
+            )
+
+            if arc_center is None:
+                arc_center = datum_point_on_plane + axis_on_plane * (
+                    (attachment_on_plane - datum_point_on_plane).dot(axis_on_plane)
+                )
+
+            leader_to_surface = attachment_on_plane - arc_center
+
+            if leader_to_surface.Length <= 1e-9:
+                return None
+
+            leader_to_surface.normalize()
+
+            if axis_on_plane.dot(leader_to_surface) < 0.0:
+                axis_on_plane = axis_on_plane.negative()
+
+            signed_angle = math.atan2(
+                axis_on_plane.cross(leader_to_surface).dot(normal),
+                axis_on_plane.dot(leader_to_surface)
+            )
+
+        return {
+            "origin": origin_on_plane,
+            "attachment": attachment_on_plane,
+            "datum_point": datum_point_on_plane,
+            "axis": axis_on_plane,
+            "arc_center": arc_center,
+            "leader": leader_to_surface,
+            "signed_angle": signed_angle,
+            "normal": normal,
+        }
+    except Exception:
+        return None
+
+
+def runout_leader_from_orientation_angle(
+    obj,
+    origin,
+    datum_point_on_plane,
+    axis_on_plane,
+    normal,
+    height,
+    fallback_attachment
+):
+    angle_degrees = float(getattr(obj, "RunoutOrientationAngle", 0.0))
+
+    if abs(angle_degrees) <= 1e-9:
+        return None
+
+    controlled = getattr(obj, "ControlledObject", None)
+    subelement = getattr(obj, "ControlledSubelement", "")
+    origin = FreeCAD.Vector(origin)
+    datum_point_on_plane = FreeCAD.Vector(datum_point_on_plane)
+    axis_on_plane = FreeCAD.Vector(axis_on_plane)
+    normal = FreeCAD.Vector(normal)
+
+    if axis_on_plane.Length <= 1e-9 or normal.Length <= 1e-9:
+        return None
+
+    axis_on_plane.normalize()
+    normal.normalize()
+    probe_length = max(
+        height * 25.0,
+        (FreeCAD.Vector(fallback_attachment) - origin).Length * 3.0
+        if fallback_attachment is not None else height * 25.0
+    )
+    candidates = []
+
+    for signed_angle in (
+        math.radians(angle_degrees),
+        -math.radians(angle_degrees),
+    ):
+        leader_direction = FreeCAD.Rotation(
+            normal,
+            math.degrees(signed_angle)
+        ).multVec(axis_on_plane)
+
+        if leader_direction.Length <= 1e-9:
+            continue
+
+        leader_direction.normalize()
+        arc_center = line_intersection_in_plane(
+            origin,
+            leader_direction,
+            datum_point_on_plane,
+            axis_on_plane,
+            normal
+        )
+
+        if arc_center is None:
+            continue
+
+        surface_point, distance = surface_point_near_plane_line(
+            controlled,
+            subelement,
+            arc_center,
+            leader_direction,
+            probe_length
+        )
+
+        if surface_point is None:
+            continue
+
+        surface_point = project_point_to_plane(surface_point, origin, normal)
+
+        if (surface_point - arc_center).dot(leader_direction) < 0.0:
+            leader_direction = leader_direction.negative()
+            signed_angle = -signed_angle
+
+        surface_distance = (surface_point - arc_center).Length
+
+        if surface_distance <= 1e-9:
+            continue
+
+        candidates.append((
+            distance,
+            (origin - arc_center).Length,
+            signed_angle,
+            arc_center,
+            surface_point,
+            leader_direction,
+        ))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: (item[0], item[1]))
+    _distance, _origin_distance, signed_angle, arc_center, surface_point, leader_direction = candidates[0]
+    return {
+        "signed_angle": signed_angle,
+        "arc_center": arc_center,
+        "surface_point": surface_point,
+        "leader_direction": leader_direction,
+    }
+
+
+def effective_annotation_basis(obj):
+    x_axis, y_axis, normal = annotation_basis(obj)
+
+    if str(getattr(obj, "ToleranceType", "")) in (
+        "CircularRunout",
+        "TotalRunout",
+    ):
+        dim_obj = matching_diameter_dimension_for_runout_fcf(obj)
+
+        if dim_obj is not None:
+            return annotation_basis(dim_obj)
+
+    return x_axis, y_axis, normal
+
+
+def effective_annotation_origin(obj):
+    origin = FreeCAD.Vector(obj.AnnotationOrigin)
+
+    if str(getattr(obj, "ToleranceType", "")) in (
+        "CircularRunout",
+        "TotalRunout",
+    ):
+        dim_obj = matching_diameter_dimension_for_runout_fcf(obj)
+
+        if dim_obj is not None:
+            _x_axis, _y_axis, normal = annotation_basis(dim_obj)
+            return project_point_to_plane(
+                origin,
+                FreeCAD.Vector(dim_obj.AnnotationOrigin),
+                normal
+            )
+
+    return origin
+
+
+def dashed_line_segments(start, end, short_length, long_length, gap_length):
+    start = FreeCAD.Vector(start)
+    end = FreeCAD.Vector(end)
+    direction = end - start
+    total = direction.Length
+
+    if total <= 1e-9:
+        return []
+
+    direction.normalize()
+    pattern = [short_length, long_length]
+    pattern_index = 0
+    cursor = 0.0
+    segments = []
+
+    while cursor < total - 1e-9:
+        dash_length = min(pattern[pattern_index % len(pattern)], total - cursor)
+        dash_start = start + direction * cursor
+        dash_end = start + direction * (cursor + dash_length)
+        segments.append((dash_start, dash_end))
+        cursor += dash_length + gap_length
+        pattern_index += 1
+
+    return segments
+
+
+def arrowhead_3d_segments(tip, tangent, plane_normal, size):
+    tangent = FreeCAD.Vector(tangent)
+
+    if tangent.Length <= 1e-9:
+        return []
+
+    tangent.normalize()
+    side = FreeCAD.Vector(plane_normal).cross(tangent)
+
+    if side.Length <= 1e-9:
+        return []
+
+    side.normalize()
+    tip = FreeCAD.Vector(tip)
+    base = tip - tangent * size
+    width = size * 0.45
+    return [
+        (tip, base + side * width),
+        (tip, base - side * width),
+    ]
+
+
+def runout_orientation_segments_and_labels(obj, attachment, origin, height, x_axis, y_axis, normal):
+    if str(getattr(obj, "ToleranceType", "")) not in (
+        "CircularRunout",
+        "TotalRunout",
+    ):
+        return [], []
+
+    try:
+        geometry = runout_display_geometry(
+            obj,
+            attachment,
+            origin,
+            height,
+            x_axis,
+            normal
+        )
+
+        if geometry is None:
+            return [], []
+
+        origin_on_plane = geometry["origin"]
+        attachment_on_plane = geometry["attachment"]
+        arc_center = geometry["arc_center"]
+        axis_on_plane = geometry["axis"]
+        leader_to_surface = geometry["leader"]
+        signed_angle = geometry["signed_angle"]
+        normal = geometry["normal"]
+
+        centerline_length = max(
+            height * 8.0,
+            (origin_on_plane - arc_center).Length * 1.2,
+            (attachment_on_plane - arc_center).Length * 1.2
+        )
+        segments = dashed_line_segments(
+            arc_center - axis_on_plane * centerline_length * 0.5,
+            arc_center + axis_on_plane * centerline_length * 0.5,
+            height * 0.55,
+            height * 1.80,
+            height * 0.38
+        )
+
+        if leader_to_surface.Length <= 1e-9:
+            leader_to_surface = origin_on_plane - arc_center
+
+        if leader_to_surface.Length <= 1e-9:
+            return segments, []
+
+        segments.append((arc_center, attachment_on_plane))
+        leader_to_surface.normalize()
+        angle_degrees = float(getattr(obj, "RunoutOrientationAngle", 0.0))
+
+        if abs(signed_angle) <= math.radians(1.0):
+            signed_angle = math.radians(angle_degrees)
+
+        if abs(signed_angle) <= math.radians(1.0):
+            return segments, []
+
+        leader_extent_from_axis = (attachment_on_plane - arc_center).Length
+        radius = max(height * 2.8, leader_extent_from_axis * 0.55)
+
+        if leader_extent_from_axis > height * 4.0:
+            radius = min(radius, leader_extent_from_axis - height * 0.8)
+        else:
+            radius = min(
+                radius,
+                max(leader_extent_from_axis * 0.85, height * 1.5)
+            )
+
+        if radius <= height * 0.8:
+            radius = height * 2.8
+
+        arc_points_3d = []
+
+        for index in range(17):
+            t = signed_angle * index / 16.0
+            direction = (
+                axis_on_plane * math.cos(t)
+                + normal.cross(axis_on_plane) * math.sin(t)
+            )
+
+            if direction.Length <= 1e-9:
+                continue
+
+            direction.normalize()
+            arc_points_3d.append(arc_center + direction * radius)
+
+        for start, end in zip(arc_points_3d, arc_points_3d[1:]):
+            segments.append((start, end))
+
+        if len(arc_points_3d) >= 2:
+            segments.extend(arrowhead_3d_segments(
+                arc_points_3d[0],
+                arc_points_3d[1] - arc_points_3d[0],
+                normal,
+                height * 0.45
+            ))
+            segments.extend(arrowhead_3d_segments(
+                arc_points_3d[-1],
+                arc_points_3d[-2] - arc_points_3d[-1],
+                normal,
+                height * 0.45
+            ))
+
+        mid_angle = signed_angle * 0.5
+        mid_direction = (
+            axis_on_plane * math.cos(mid_angle)
+            + normal.cross(axis_on_plane) * math.sin(mid_angle)
+        )
+
+        if mid_direction.Length <= 1e-9:
+            mid_direction = leader_to_surface
+
+        mid_direction.normalize()
+        label_radius = radius + height * 0.9
+
+        if abs(math.degrees(signed_angle)) < 25.0:
+            label_radius = radius + height * 1.5
+
+        label_point = arc_center + mid_direction * label_radius
+        labels = [
+            ("{:.3g}°".format(angle_degrees), label_point)
+        ]
+        return segments, labels
+    except Exception:
+        return [], []
+
+
 def referenced_attachment_point(obj):
     referenced = getattr(obj, "ReferencedObject", None)
     subelement = getattr(obj, "ReferencedSubelement", "")
@@ -432,6 +1345,329 @@ def referenced_attachment_point(obj):
         return FreeCAD.Vector(target.CenterOfMass)
     except Exception:
         return None
+
+
+def matching_diameter_dimension_for_datum(datum_obj):
+    if str(getattr(datum_obj, "DatumType", "")) != "Axis":
+        return None
+
+    referenced = getattr(datum_obj, "ReferencedObject", None)
+    subelement = getattr(datum_obj, "ReferencedSubelement", "")
+
+    if referenced is None or not subelement:
+        return None
+
+    try:
+        document = datum_obj.Document
+    except Exception:
+        return None
+
+    for candidate in document.Objects:
+        if str(getattr(candidate, "DimensionKind", "")) != "Diameter":
+            continue
+
+        for object_property, subelement_property in (
+            ("ReferenceObject1", "ReferenceSubelement1"),
+            ("ReferenceObject2", "ReferenceSubelement2"),
+        ):
+            if (
+                getattr(candidate, object_property, None) == referenced
+                and getattr(candidate, subelement_property, "") == subelement
+            ):
+                return candidate
+
+    return None
+
+
+def dimension_references_object_subelement(dim_obj, referenced, subelement):
+    if dim_obj is None or referenced is None or not subelement:
+        return False
+
+    for object_property, subelement_property in (
+        ("ReferenceObject1", "ReferenceSubelement1"),
+        ("ReferenceObject2", "ReferenceSubelement2"),
+    ):
+        if (
+            getattr(dim_obj, object_property, None) == referenced
+            and getattr(dim_obj, subelement_property, "") == subelement
+        ):
+            return True
+
+    return False
+
+
+def matching_diameter_dimension_for_runout_fcf(fcf_obj):
+    try:
+        document = fcf_obj.Document
+    except Exception:
+        return None
+
+    controlled = getattr(fcf_obj, "ControlledObject", None)
+    controlled_sub = getattr(fcf_obj, "ControlledSubelement", "")
+
+    for candidate in reversed(document.Objects):
+        if str(getattr(candidate, "DimensionKind", "")) != "Diameter":
+            continue
+
+        if dimension_references_object_subelement(
+            candidate,
+            controlled,
+            controlled_sub
+        ):
+            return candidate
+
+    axis_datum = None
+    datum_reference = getattr(fcf_obj, "DatumReference", None)
+
+    if (
+        datum_reference is not None
+        and str(getattr(datum_reference, "DatumType", "")) == "Axis"
+    ):
+        axis_datum = datum_reference
+
+    if axis_datum is None:
+        datum_system = getattr(fcf_obj, "DatumSystem", None)
+
+        if datum_system is not None:
+            for _role, datums in datum_system_compartments(datum_system):
+                for datum in datums:
+                    if str(getattr(datum, "DatumType", "")) == "Axis":
+                        axis_datum = datum
+                        break
+
+                if axis_datum is not None:
+                    break
+
+    if axis_datum is None:
+        return None
+
+    referenced = getattr(axis_datum, "ReferencedObject", None)
+    subelement = getattr(axis_datum, "ReferencedSubelement", "")
+
+    for candidate in reversed(document.Objects):
+        if str(getattr(candidate, "DimensionKind", "")) != "Diameter":
+            continue
+
+        if dimension_references_object_subelement(
+            candidate,
+            referenced,
+            subelement
+        ):
+            return candidate
+
+    return None
+
+
+def matching_fcf_for_datum_feature(datum_obj):
+    if str(getattr(datum_obj, "DatumType", "")) != "Axis":
+        return None
+
+    referenced = getattr(datum_obj, "ReferencedObject", None)
+    subelement = getattr(datum_obj, "ReferencedSubelement", "")
+
+    if referenced is None or not subelement:
+        return None
+
+    try:
+        document = datum_obj.Document
+    except Exception:
+        return None
+
+    for candidate in document.Objects:
+        if not hasattr(candidate, "ToleranceType"):
+            continue
+
+        if (
+            getattr(candidate, "ControlledObject", None) == referenced
+            and getattr(candidate, "ControlledSubelement", "") == subelement
+        ):
+            return candidate
+
+    return None
+
+
+def datum_box_geometry_on_fcf(datum_obj, fcf_obj):
+    try:
+        label = str(getattr(datum_obj, "DatumLabel", ""))
+        origin = FreeCAD.Vector(fcf_obj.AnnotationOrigin)
+        height = max(float(fcf_obj.AnnotationTextHeight), 1.0)
+        x_axis, y_axis, normal = annotation_basis(fcf_obj)
+    except Exception:
+        return None
+
+    padding = height * 0.30
+    spans = []
+
+    for kind, text in fcf_cells(fcf_obj):
+        if kind == "symbol":
+            width = height * 1.6
+        elif kind == "tolerance":
+            width = max(fcf_tolerance_width(text, height), height * 2.2)
+        else:
+            width = max(
+                len(text) * height * TEXT_WIDTH_FACTOR,
+                height * 1.6
+            )
+
+        spans.append(width + padding * 2.0)
+
+    if not spans:
+        return None
+
+    total_width = sum(spans)
+    datum_padding = height * 0.25
+    box_height = height + datum_padding * 2.0
+    label_width = max(
+        len(label) * height * TEXT_WIDTH_FACTOR,
+        height
+    )
+    box_width = label_width + datum_padding * 2.0
+    attach_x = min(
+        max(height * 1.2, box_width * 0.5),
+        max(total_width - box_width * 0.5, box_width * 0.5)
+    )
+    frame_bottom = origin + x_axis * attach_x
+    triangle_width = height * 0.9
+    triangle_length = height * 0.9
+    triangle_left = frame_bottom - x_axis * (triangle_width * 0.5)
+    triangle_right = frame_bottom + x_axis * (triangle_width * 0.5)
+    triangle_apex = frame_bottom - y_axis * triangle_length
+    connector_gap = height * 0.30
+    box_center = triangle_apex - y_axis * (
+        connector_gap
+        + box_height * 0.5
+    )
+    lower_left = (
+        box_center
+        - x_axis * (box_width * 0.5)
+        - y_axis * (box_height * 0.5)
+    )
+    box_top_midpoint = local_point(
+        lower_left,
+        x_axis,
+        y_axis,
+        box_width * 0.5,
+        box_height
+    )
+    box_points = [
+        local_point(lower_left, x_axis, y_axis, 0, 0),
+        local_point(lower_left, x_axis, y_axis, box_width, 0),
+        local_point(lower_left, x_axis, y_axis, box_width, box_height),
+        local_point(lower_left, x_axis, y_axis, 0, box_height),
+        local_point(lower_left, x_axis, y_axis, 0, 0),
+    ]
+    segments = [
+        (triangle_left, triangle_right),
+        (triangle_right, triangle_apex),
+        (triangle_apex, triangle_left),
+        (triangle_apex, box_top_midpoint),
+    ]
+    segments.extend(zip(box_points, box_points[1:]))
+    text_origin = local_point(
+        lower_left,
+        x_axis,
+        y_axis,
+        max((box_width - label_width) * 0.5, datum_padding),
+        box_height * 0.5
+    )
+
+    return {
+        "segments": segments,
+        "text_origin": text_origin,
+        "label": label,
+        "height": height,
+        "x_axis": x_axis,
+        "y_axis": y_axis,
+        "normal": normal,
+    }
+
+
+def datum_box_geometry_on_diameter_dimension(datum_obj, dim_obj):
+    try:
+        label = str(getattr(datum_obj, "DatumLabel", ""))
+        dim_data = dimension_display_data(dim_obj)
+        dim_origin = FreeCAD.Vector(dim_obj.AnnotationOrigin)
+        height = max(float(dim_obj.AnnotationTextHeight), 1.0)
+        x_axis, y_axis, normal = annotation_basis(dim_obj)
+        point1 = FreeCAD.Vector(dim_data["point1"])
+        point2 = FreeCAD.Vector(dim_data["point2"])
+    except Exception:
+        return None
+
+    datum_padding = height * 0.25
+    box_height = height + datum_padding * 2.0
+    label_width = max(
+        len(label) * height * TEXT_WIDTH_FACTOR,
+        height
+    )
+    box_width = label_width + datum_padding * 2.0
+    line_point1 = dim_origin + x_axis * (point1 - dim_origin).dot(x_axis)
+    line_point2 = dim_origin + x_axis * (point2 - dim_origin).dot(x_axis)
+    extension1 = line_point1 - point1
+    extension2 = line_point2 - point2
+    candidates = []
+
+    for model_point, line_point, extension in (
+        (point1, line_point1, extension1),
+        (point2, line_point2, extension2),
+    ):
+        if extension.Length <= 1e-9:
+            continue
+
+        direction = FreeCAD.Vector(extension)
+        direction.normalize()
+        x_offset = (line_point - dim_origin).dot(x_axis)
+        candidates.append((x_offset, line_point, direction))
+
+    if not candidates:
+        return None
+
+    _score, leader_point, _leader_direction = min(
+        candidates,
+        key=lambda item: item[0]
+    )
+
+    # For an axis datum applied to an internal diameter, ASME-style model views
+    # show the datum identifier below the diameter callout and attached to one
+    # diameter extension/leader line.  Use the feature-side extension line as a
+    # vertical datum stem instead of continuing in the extension direction,
+    # which can place the datum above the dimension text.
+    box_center = (
+        leader_point
+        - y_axis * (height * 1.45 + box_height * 0.5)
+    )
+    stem_contact = box_center + y_axis * (box_height * 0.5)
+    lower_left = (
+        box_center
+        - x_axis * (box_width * 0.5)
+        - y_axis * (box_height * 0.5)
+    )
+    box_points = [
+        local_point(lower_left, x_axis, y_axis, 0, 0),
+        local_point(lower_left, x_axis, y_axis, box_width, 0),
+        local_point(lower_left, x_axis, y_axis, box_width, box_height),
+        local_point(lower_left, x_axis, y_axis, 0, box_height),
+        local_point(lower_left, x_axis, y_axis, 0, 0),
+    ]
+    segments = [(leader_point, stem_contact)]
+    segments.extend(zip(box_points, box_points[1:]))
+    text_origin = local_point(
+        lower_left,
+        x_axis,
+        y_axis,
+        max((box_width - label_width) * 0.5, datum_padding),
+        box_height * 0.5
+    )
+
+    return {
+        "segments": segments,
+        "text_origin": text_origin,
+        "label": label,
+        "height": height,
+        "x_axis": x_axis,
+        "y_axis": y_axis,
+        "normal": normal,
+    }
 
 
 def dragged_annotation_origin(initial_origin, x_axis, y_axis, translation):
@@ -639,9 +1875,9 @@ class ViewProviderSingleItemFCF:
 
         obj = self.Object
         self.geometry.removeAllChildren()
-        origin = FreeCAD.Vector(obj.AnnotationOrigin)
+        origin = effective_annotation_origin(obj)
         height = max(float(obj.AnnotationTextHeight), 1.0)
-        x_axis, y_axis, _normal = annotation_basis(obj)
+        x_axis, y_axis, _normal = effective_annotation_basis(obj)
         cells = fcf_cells(obj)
         padding = height * 0.30
         spans = []
@@ -689,11 +1925,39 @@ class ViewProviderSingleItemFCF:
             ))
 
         attachment = fcf_attachment_point(obj)
+        extra_labels = []
 
         if attachment is not None:
+            if str(getattr(obj, "ToleranceType", "")) in (
+                "CircularRunout",
+                "TotalRunout",
+            ):
+                runout_geometry = runout_display_geometry(
+                    obj,
+                    attachment,
+                    origin,
+                    height,
+                    x_axis,
+                    _normal
+                )
+
+                if runout_geometry is not None:
+                    attachment = runout_geometry["attachment"]
+
             segments.extend(
                 fcf_leader_segments(obj, attachment, origin, height)
             )
+            runout_segments, runout_labels = runout_orientation_segments_and_labels(
+                obj,
+                attachment,
+                origin,
+                height,
+                x_axis,
+                y_axis,
+                _normal
+            )
+            segments.extend(runout_segments)
+            extra_labels.extend(runout_labels)
 
         x = 0.0
 
@@ -789,6 +2053,17 @@ class ViewProviderSingleItemFCF:
 
             x += span
 
+        for label_text, label_origin in extra_labels:
+            add_inline_text(
+                self.geometry,
+                label_text,
+                label_origin,
+                x_axis,
+                y_axis,
+                _normal,
+                height * 0.8
+            )
+
         material = coin.SoMaterial()
         material.diffuseColor.setValue(1.0, 1.0, 1.0)
         draw_style = coin.SoDrawStyle()
@@ -811,10 +2086,23 @@ class ViewProviderSingleItemFCF:
             "ProjectedToleranceHeight",
             "UnequallyDisposedZone",
             "UnequallyDisposedOffset",
+            "TangentPlaneModifier",
+            "StatisticalToleranceModifier",
+            "CommonZoneModifier",
+            "MaximumToleranceValueEnabled",
+            "MaximumToleranceValue",
+            "UnitBasisToleranceEnabled",
+            "UnitBasisType",
+            "UnitBasisPrimaryLength",
+            "UnitBasisSecondaryLength",
+            "NonUniformToleranceZone",
             "DatumSystem",
             "DatumReference",
             "ControlledObject",
             "ControlledSubelement",
+            "AffectedPlaneObject",
+            "AffectedPlaneSubelement",
+            "RunoutOrientationAngle",
             "AnnotationOrigin",
             "AnnotationNormal",
             "AnnotationDirection",
@@ -852,7 +2140,7 @@ class ViewProviderSingleItemFCF:
         self.move_active = False
         self.move_has_moved = False
         self.move_anchor = None
-        self.drag_x, self.drag_y, _normal = annotation_basis(self.Object)
+        self.drag_x, self.drag_y, _normal = effective_annotation_basis(self.Object)
         self.move_view = vobj.Document.activeView()
         self.move_gui_document = vobj.Document
         self.move_location_callback = self.move_view.addEventCallbackPivy(
@@ -887,13 +2175,13 @@ class ViewProviderSingleItemFCF:
         view_direction = FreeCAD.Vector(
             view.getViewDirection()
         )
-        _x_axis, _y_axis, normal = annotation_basis(self.Object)
+        _x_axis, _y_axis, normal = effective_annotation_basis(self.Object)
         denominator = normal.dot(view_direction)
 
         if abs(denominator) <= 1e-9:
             return None
 
-        origin = FreeCAD.Vector(self.Object.AnnotationOrigin)
+        origin = effective_annotation_origin(self.Object)
         distance = normal.dot(origin - cursor_point) / denominator
         return cursor_point + view_direction * distance
 
@@ -902,14 +2190,28 @@ class ViewProviderSingleItemFCF:
             return False
 
         try:
+            selection = FreeCADGui.Selection.getSelection()
+
+            if self.Object in selection:
+                return True
+        except Exception:
+            pass
+
+        try:
             preselection = FreeCADGui.Selection.getPreselection()
             preselected_object = getattr(preselection, "Object", None)
+
+            if preselected_object == self.Object:
+                return True
 
             if (
                 preselected_object is not None
                 and preselected_object != self.Object
             ):
-                return False
+                selection = FreeCADGui.Selection.getSelection()
+
+                if self.Object not in selection:
+                    return False
         except Exception:
             pass
 
@@ -1384,9 +2686,63 @@ class ViewProviderSingleItemDatumFeature(ViewProviderSingleItemFCF):
         if self.geometry is None or self.Object is None:
             return
 
+        started = time.perf_counter()
         obj = self.Object
         self.geometry.removeAllChildren()
+        cleared = time.perf_counter()
+        datum_box = None
+        fcf_obj = matching_fcf_for_datum_feature(obj)
+        fcf_lookup_done = time.perf_counter()
+
+        if fcf_obj is not None:
+            datum_box = datum_box_geometry_on_fcf(obj, fcf_obj)
+        fcf_geometry_done = time.perf_counter()
+
+        dim_obj = matching_diameter_dimension_for_datum(obj)
+        dimension_lookup_done = time.perf_counter()
+
+        if datum_box is None and dim_obj is not None:
+            datum_box = datum_box_geometry_on_diameter_dimension(obj, dim_obj)
+        dimension_geometry_done = time.perf_counter()
+
+        if datum_box is not None:
+            material = coin.SoMaterial()
+            material.diffuseColor.setValue(1.0, 1.0, 1.0)
+            draw_style = coin.SoDrawStyle()
+            draw_style.lineWidth = 1.0
+            self.geometry.addChild(material)
+            self.geometry.addChild(draw_style)
+            add_line_geometry(self.geometry, datum_box["segments"])
+            add_world_text(
+                self.geometry,
+                datum_box["text_origin"],
+                datum_box["label"],
+                datum_box["height"],
+                datum_box["x_axis"],
+                datum_box["y_axis"],
+                datum_box["normal"]
+            )
+            finished = time.perf_counter()
+
+            if finished - started > 0.25:
+                FreeCAD.Console.PrintMessage(
+                    "Datum feature rebuild phases for {}: clear {:.3f}s,"
+                    " fcf lookup {:.3f}s, fcf geometry {:.3f}s,"
+                    " diameter lookup {:.3f}s, diameter geometry {:.3f}s,"
+                    " draw {:.3f}s\n".format(
+                        obj.Name,
+                        cleared - started,
+                        fcf_lookup_done - cleared,
+                        fcf_geometry_done - fcf_lookup_done,
+                        dimension_lookup_done - fcf_geometry_done,
+                        dimension_geometry_done - dimension_lookup_done,
+                        finished - dimension_geometry_done
+                    )
+                )
+            return
+
         attachment = referenced_attachment_point(obj)
+        attachment_done = time.perf_counter()
 
         if attachment is None:
             return
@@ -1453,6 +2809,24 @@ class ViewProviderSingleItemDatumFeature(ViewProviderSingleItemFCF):
             y_axis,
             normal
         )
+        finished = time.perf_counter()
+
+        if finished - started > 0.25:
+            FreeCAD.Console.PrintMessage(
+                "Datum feature rebuild phases for {}: clear {:.3f}s,"
+                " fcf lookup {:.3f}s, fcf geometry {:.3f}s,"
+                " diameter lookup {:.3f}s, diameter geometry {:.3f}s,"
+                " attachment {:.3f}s, draw {:.3f}s\n".format(
+                    obj.Name,
+                    cleared - started,
+                    fcf_lookup_done - cleared,
+                    fcf_geometry_done - fcf_lookup_done,
+                    dimension_lookup_done - fcf_geometry_done,
+                    dimension_geometry_done - dimension_lookup_done,
+                    attachment_done - dimension_geometry_done,
+                    finished - attachment_done
+                )
+            )
 
     def updateData(self, obj, prop):
         if prop in {
@@ -1469,7 +2843,7 @@ class ViewProviderSingleItemDatumFeature(ViewProviderSingleItemFCF):
 
 def dimension_display_data(obj):
     if hasattr(obj, "DimensionKind"):
-        from MBDDimension import dimension_display_label, measurement_from_references
+        from .MBDDimension import dimension_display_label, measurement_from_references
 
         measurement = measurement_from_references(
             obj.DimensionKind,
@@ -1498,7 +2872,7 @@ def dimension_display_data(obj):
 
         return data
 
-    from MBDBasicDimension import display_points_from_references
+    from .MBDBasicDimension import display_points_from_references
 
     point1, point2 = display_points_from_references(
         obj.ReferenceObject1,
@@ -1508,10 +2882,7 @@ def dimension_display_data(obj):
     )
     return {
         "kind": "Linear",
-        "label": FreeCAD.Units.Quantity(
-            obj.NominalValue,
-            FreeCAD.Units.Length
-        ).UserString,
+        "label": format_length_for_annotation(obj.NominalValue),
         "point1": point1,
         "point2": point2,
         "boxed": True,
