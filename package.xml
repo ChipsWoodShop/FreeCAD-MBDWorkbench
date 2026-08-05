@@ -2,7 +2,7 @@
 <package format="1" xmlns="https://wiki.freecad.org/Package_Metadata">
   <name>MBDWorkbench</name>
   <version>0.1.0</version>
-  <date>2026-08-02</date>
+  <date>2026-08-04</date>
   <description>Model-Based Definition workbench for semantic PMI authoring, validation, AP242 STEP export, and first-pass AP242 semantic PMI import.</description>
   <maintainer email="Chip@chipswoodshop.com">Chip</maintainer>
   <license file="LICENSE">LGPL-2.1-only</license>
