@@ -1,6 +1,6 @@
-# FreeCAD MBD Workbench
+# FreeCAD Model-Based Definition (MBD) Workbench
 
-FreeCAD MBD Workbench adds model-based definition tools for semantic PMI, GD&T annotations, validation, and AP242 STEP exchange.
+FreeCAD Model-Based Definition (MBD) Workbench adds semantic Product Manufacturing Information (PMI), Geometric Dimensioning and Tolerancing (GD&T) annotations, validation, and ISO 10303-242 (AP242) Standard for the Exchange of Product Model Data (STEP) exchange.
 
 This addon is early public-preview software. The current focus is semantic definition and AP242 interoperability; visual annotation polish and some advanced AP242 variants are still under active development.
 
@@ -29,7 +29,7 @@ Restart FreeCAD and activate the `MBD` workbench.
 ## Current Capabilities
 
 - Create datum features, datum targets, datum systems, dimensions, and feature control frames.
-- Validate PMI attachments, datum-system sufficiency, dimension rules, and supported FCF geometry rules.
+- Validate PMI attachments, datum-system sufficiency, dimension rules, and supported feature control frame (FCF) geometry rules.
 - Inspect PMI in the active FreeCAD document.
 - Export supported semantic PMI to AP242 STEP.
 - Inspect AP242 STEP files for semantic PMI coverage.
@@ -42,7 +42,7 @@ Supported AP242 workflows include many common datum, datum target, dimension, an
 - AP242 semantic import is conservative: unsupported or unsafe PMI is reported rather than silently converted.
 - Presentation PMI export currently uses lightweight annotation placeholders, not exact graphical leader/frame/text reconstruction.
 - Some derived-axis, path-defined, and advanced tolerance-zone cases remain future work.
-- Annotation appearance and drag interaction are functional but not final ASME-style polish.
+- Annotation appearance and drag interaction are functional but not entirely implemented as shown in ASME Y14.5 (American Society of Mechanical Engineers GD&T Standard).
 - Saved-document compatibility is not guaranteed before a stable `1.0.0` release.
 
 ## Testing
@@ -77,4 +77,4 @@ See `CONTRIBUTING.md` for contribution guidelines and recommended local checks.
 
 ## License
 
-FreeCAD MBD Workbench is licensed under the GNU Lesser General Public License v2.1 only. See `LICENSE`.
+FreeCAD MBD Workbench is licensed under the GNU Lesser General Public License (LGPL) v2.1 only. See `LICENSE`.
