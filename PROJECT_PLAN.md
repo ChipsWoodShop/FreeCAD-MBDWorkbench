@@ -117,7 +117,7 @@ checklist against the current official page.
 | Top-level icon | Done | Manifest points to `freecad/mbd_workbench/mbd_command_icons/create_datum_feature.svg` with `/` separators. |
 | Workbench content metadata | Done | Manifest includes a `<content>` section with one `<workbench>` child, name, version, description, subdirectory, classname, and icon. |
 | Workbench classname | Resolved | Use `<classname>MBDWorkbench</classname>` to match `freecad/mbd_workbench/InitGui.py`. Root `InitGui.py` remains only as a FreeCAD Mod-directory registration shim. |
-| Workbench subdirectory | Done | Source modules and command icons have been migrated to `freecad/mbd_workbench/`. Use `<subdirectory>freecad/mbd_workbench</subdirectory>` in `package.xml`; root `Init.py` and `InitGui.py` are retained as thin local-install shims. |
+| Workbench subdirectory | Done | Source modules and command icons live under `freecad/mbd_workbench/`; `package.xml` uses `<subdirectory>./</subdirectory>` so FreeCAD discovers the root `Init.py` and `InitGui.py` shims. |
 | Repository URL and branch metadata | Resolved | Use `<url type="repository" branch="main">https://github.com/ChipsWoodShop/FreeCAD-MBDWorkbench</url>`. |
 | Stable indexed branch | Resolved for preview | The first preview manifest points Addon Index metadata at `main`. Revisit a long-lived `stable`/`release` branch before a compatibility-focused `1.0.0` release. |
 | README URL | Done | Manifest includes a GitHub README URL. |

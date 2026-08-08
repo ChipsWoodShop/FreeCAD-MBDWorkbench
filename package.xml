@@ -23,7 +23,7 @@
       <name>MBD</name>
       <version>0.1.0</version>
       <description>Tools for FreeCAD semantic PMI, GD&amp;T annotations, validation, and AP242 STEP exchange.</description>
-      <subdirectory>freecad/mbd_workbench</subdirectory>
+      <subdirectory>./</subdirectory>
       <classname>MBDWorkbench</classname>
       <icon>freecad/mbd_workbench/mbd_command_icons/create_datum_feature.svg</icon>
     </workbench>
